@@ -5,6 +5,14 @@
   "type": "module",
   "license": "MIT",
   "author": "David Castillo Alvarado <dcastilloa@uni.pe>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davidcastilloalvarado/dsh-google-chrome-search.git"
+  },
+  "homepage": "https://github.com/davidcastilloalvarado/dsh-google-chrome-search#readme",
+  "bugs": {
+    "url": "https://github.com/davidcastilloalvarado/dsh-google-chrome-search/issues"
+  },
   "keywords": [
     "google-search",
     "search",

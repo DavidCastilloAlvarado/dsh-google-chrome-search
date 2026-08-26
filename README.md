@@ -1,6 +1,6 @@
 # dsh-google-chrome-search
 
-[![CI](https://github.com/OWNER/dsh-google-chrome-search/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/dsh-google-chrome-search/actions/workflows/ci.yml)
+[![CI](https://github.com/davidcastilloalvarado/dsh-google-chrome-search/actions/workflows/ci.yml/badge.svg)](https://github.com/davidcastilloalvarado/dsh-google-chrome-search/actions/workflows/ci.yml)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![node: >=18](https://img.shields.io/badge/node-%3E%3D18-green.svg)](https://nodejs.org)
 
@@ -37,7 +37,7 @@ tries to solve a CAPTCHA itself.
 ## Install
 
 ```sh
-git clone https://github.com/OWNER/dsh-google-chrome-search.git
+git clone https://github.com/davidcastilloalvarado/dsh-google-chrome-search.git
 cd dsh-google-chrome-search
 npm install
 ```
