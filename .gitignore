@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Local Chrome profile (cookies, screenshots) — never commit
+.dsh-chrome-google/
+
+# Logs & OS noise
+*.log
+npm-debug.log*
+.DS_Store

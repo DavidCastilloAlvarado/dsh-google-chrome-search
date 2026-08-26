@@ -1,0 +1,52 @@
+{
+  "name": "dsh-google-chrome-search",
+  "version": "0.1.0",
+  "description": "Google web search for AI agents: drives your local Chrome over CDP (no API key) with a human-verification (CAPTCHA) fallback. Ships as a CLI, an MCP stdio server, and a DSH skill.",
+  "type": "module",
+  "license": "MIT",
+  "author": "David Castillo Alvarado <dcastilloa@uni.pe>",
+  "keywords": [
+    "google-search",
+    "search",
+    "web-search",
+    "chrome",
+    "chromium",
+    "cdp",
+    "puppeteer",
+    "mcp",
+    "model-context-protocol",
+    "deepseek-harness",
+    "dsh",
+    "captcha",
+    "cli"
+  ],
+  "bin": {
+    "dsh-google-search": "./bin/google-search.mjs"
+  },
+  "main": "./src/search.mjs",
+  "exports": {
+    ".": "./src/search.mjs",
+    "./server": "./src/server.mjs",
+    "./cli": "./bin/google-search.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "skill",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "search": "node ./bin/google-search.mjs",
+    "server": "node ./src/server.mjs",
+    "test": "node ./test-mcp.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "puppeteer-core": "^24.0.0",
+    "zod": "^3.25.0 || ^4.0.0"
+  }
+}
