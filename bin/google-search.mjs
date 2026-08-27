@@ -25,6 +25,9 @@
  *   --html                 also print the extracted HTML
  *   --screenshot           also save a screenshot of the rendered page
  *   --timeout <ms>         navigation timeout (default 20000)
+ *   --no-verify            if the site serves a human-verification challenge, do NOT open
+ *                          a visible window — just report "blocked"
+ *   --verify-timeout <ms>  how long to wait for the human to pass a page challenge (default 150000)
  *   --json                 print the raw JSON outcome
  *   --chrome <path>        Chrome executable path
  *   --profile <dir>        persistent Chrome profile dir
@@ -140,6 +143,7 @@ function printFetch(p) {
   if (p.byline) console.log(`By: ${p.byline}`)
   if (p.siteName) console.log(`Site: ${p.siteName}`)
   console.log(`Mode: ${p.readable ? 'readable article' : 'full page text'}`)
+  if (p.verifiedViaHuman) console.log('Verified via human')
   console.log('')
   console.log(p.text || '(no text extracted)')
   if (p.truncated) console.log('\n[truncated]')
@@ -197,6 +201,8 @@ async function main() {
         includeHtml: opts.includeHtml,
         screenshot: opts.screenshot,
         timeoutMs: opts.timeoutMs,
+        autoVerify: opts.autoVerify,
+        verifyTimeoutMs: opts.verifyTimeoutMs,
         chromePath: opts.chromePath,
         profileDir: opts.profileDir,
         log,

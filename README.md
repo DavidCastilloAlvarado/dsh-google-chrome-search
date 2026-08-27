@@ -83,6 +83,12 @@ The plugin can also **render any URL and extract its readable main content**:
   If the page has no distinct article, it falls back to the full page text.
 - Capped output (default **8,000 chars** per page) so it stays agent-context friendly.
 - Detects **anti-bot walls** and reports `blocked` instead of returning garbage.
+  When a site serves a **human-verification challenge** (e.g. DataDome's "slide to
+  continue" wall), it opens a **visible Chrome window** with the page, waits up to
+  `verifyTimeoutMs` for the human to pass it, then extracts the real content — the
+  same hand-to-human philosophy as the Google CAPTCHA flow. The trusted session
+  cookie persists in the profile, so later pages of that site usually pass headless.
+  Use `--no-verify` / `autoVerify: false` to just report `blocked` instead.
 
 ```sh
 dsh-google-search fetch "https://example.com/article" --max-chars 10000
@@ -132,8 +138,9 @@ Notes:
   tool calls queue rather than run in parallel.
 - `search_and_fetch` is slower than plain search: keep `toolCallTimeoutMs`
   at `300000` (5 min) as shown above.
-- The human-verification flow applies to the **search step** of both search tools;
-  `fetch` works headless and reports `blocked` if a site walls off the browser.
+- The human-verification flow applies to **both** the Google search (CAPTCHA) and
+  to result pages that wall off the browser (anti-bot slider): a visible Chrome
+  window opens for the human, and the session persists in the profile afterwards.
 
 ## Use it as a DSH skill
 
@@ -196,7 +203,8 @@ gracefully.
 | CAPTCHA on every search | Keep the dedicated profile (`~/.dsh-chrome-google`) — deleting it resets the "verified" cookies. Datacenter IPs get CAPTCHAs more often. |
 | No visible window appears on SSH | Use a machine with a display, or set `autoVerify: false` and solve the CAPTCHA manually in the printed screenshot's browser context. |
 | `ECONNREFUSED` / stale lock in the profile | Close all Chrome instances using that profile, then retry (the profile is separate from your personal one). Don't run two CLI calls at once — one process per profile. |
-| `fetch` returns `blocked` | The site walls off headless browsers (Cloudflare-style). Try a different source for the same topic, or read it in your normal browser. |
+| `fetch` opens a window with a slider / "confirm you are human" | That's the human-verification step working as intended: pass the challenge in the window, then it retries and keeps the session. `--no-verify` skips the window and just reports `blocked`. |
+| `fetch` returns `blocked` (no window) | The site walls off headless browsers and `autoVerify` is off (or no display). Try a different source for the same topic, or run with verification enabled. |
 | `fetch` returns empty text | The page is JS-heavy and hadn't finished rendering; retry (it settles up to ~7 s), or bump `--timeout`. |
 
 ## Revert / clean up

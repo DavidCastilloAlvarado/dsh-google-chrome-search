@@ -58,9 +58,17 @@ Behavior notes:
   not the whole page. Non-article pages fall back to full page text.
 - The page is rendered in the same dedicated profile as the search — consistent
   fingerprint, never the user's real browser.
+- Some sites (NYT and other paywalled news, for example) serve a **human-verification
+  challenge** ("slide to continue", "confirm you are human"). By default the tool opens a
+  **visible Chrome window** with the page and waits for the human to pass it, then extracts
+  the real content (output says `Verified via human`). Treat it like the Google CAPTCHA flow:
+  tell the user "a Chrome window opened — please complete the verification in it", wait for
+  confirmation, then continue. The trusted session is kept in the profile, so the next page
+  of the same site usually needs no verification. `--no-verify` skips the window and just
+  reports `blocked`.
 - Exit 3 can mean the page was **blocked by an anti-bot wall** (the output says
-  `FETCH BLOCKED`) or that the search yielded no results. When blocked, fetch a
-  different source for the same topic instead of retrying.
+  `FETCH BLOCKED`) or that the search yielded no results. When blocked (and no window
+  opened), fetch a different source for the same topic instead of retrying.
 - Pages render sequentially (~1–3 s each). Don't run two commands at once — one
   Chrome process per profile.
 

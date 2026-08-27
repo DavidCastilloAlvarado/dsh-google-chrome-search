@@ -130,22 +130,26 @@ async function extractFromPage(page) {
 
 /**
  * Fetch, render and extract one URL on an already-open page.
+ * With `o.navigate === false` the page is assumed to already be loaded
+ * (used after a human-verification round).
  * Returns a page outcome (see fetchPage return shape).
  */
 async function fetchUrlOnPage(page, url, o) {
   const { maxChars, includeHtml, wantShot, timeoutMs, shotDir, log } = o
-  try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
-  } catch (err) {
-    return {
-      status: 'error',
-      url,
-      finalUrl: page.url() || url,
-      message: `Navigation failed: ${err && err.message ? err.message : String(err)}`,
+  if (o.navigate !== false) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+    } catch (err) {
+      return {
+        status: 'error',
+        url,
+        finalUrl: page.url() || url,
+        message: `Navigation failed: ${err && err.message ? err.message : String(err)}`,
+      }
     }
   }
   const finalUrl = page.url() || url
-  await settlePage(page)
+  if (o.navigate !== false) await settlePage(page)
   const raw = await extractFromPage(page)
 
   if (looksBlocked(finalUrl, raw.title, raw.fullText.slice(0, 500))) {
@@ -178,6 +182,11 @@ async function fetchUrlOnPage(page, url, o) {
     textLength: source.length,
     screenshot: null,
   }
+  // An empty shell is the shape of a soft wall — keep a screenshot of it so the
+  // caller can show it to the human / include it in the blocked report.
+  if ((source || '').trim().length < 200) {
+    outcome.screenshot = await capture(page, shotDir, 'wall').catch(() => null)
+  }
   if (includeHtml) {
     const html = raw.readable ? raw.contentHtml : await page.content().catch(() => '')
     outcome.html = cap(html, maxChars).text
@@ -185,6 +194,92 @@ async function fetchUrlOnPage(page, url, o) {
   if (wantShot) outcome.screenshot = await capture(page, shotDir, 'page')
   log(`extracted ${source.length} chars from ${finalUrl} (${raw.readable ? 'readable article' : 'full page text'})`)
   return outcome
+}
+
+/**
+ * A "soft wall": the page rendered but yielded no usable text — the typical
+ * shape of an anti-bot slider challenge (DataDome & co.) served in an empty
+ * shell. Marker-based detection (looksBlocked) misses these because the
+ * challenge is drawn in an isolated frame.
+ */
+function isWall(p) {
+  return p.status === 'ok' && (p.text || '').trim().length < 200
+}
+
+/**
+ * Hand a walled page to the human: open a VISIBLE Chrome window (same
+ * dedicated profile) on the page, wait up to verifyTimeoutMs for the human
+ * to pass the challenge (page text appearing), then extract the content.
+ * The trusted session cookie persists in the profile, so later pages of the
+ * same site usually pass headless.
+ */
+async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, extra = {}) {
+  const { maxChars = 8000, wantShot = false } = extra
+  let browser
+  try {
+    browser = await launchChrome({ headless: false }, env, chromeOpts)
+  } catch (err) {
+    return {
+      status: 'blocked',
+      url,
+      message:
+        `The page is behind a human-verification challenge, but the visible Chrome ` +
+        `window could not be opened: ${err && err.message ? err.message : String(err)}`,
+    }
+  }
+  try {
+    const page = (await browser.pages())[0] || (await browser.newPage())
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 })
+    } catch {
+      /* the wall may intercept navigation — the challenge still renders */
+    }
+    log(`waiting up to ${verifyTimeoutMs}ms for the human to pass the challenge in the visible window`)
+    const deadline = Date.now() + verifyTimeoutMs
+    let solved = false
+    while (Date.now() < deadline) {
+      await sleep(2000)
+      const st = await page
+        .evaluate(() => ((document.body && document.body.innerText) || '').length)
+        .catch(() => null)
+      if (st === null) break // the human closed the window
+      if (st > 300) {
+        solved = true
+        break
+      }
+    }
+    if (!solved) {
+      const shot = await capture(page, shotDir, 'wall').catch(() => null)
+      return {
+        status: 'blocked',
+        url,
+        finalUrl: page.url() || url,
+        screenshot: shot,
+        message:
+          'The page is behind a human-verification challenge (anti-bot) and it was not ' +
+          'completed in time. A visible Chrome window was opened on the page — if the human ' +
+          'solves the challenge, retry: the trusted session is kept in the profile.',
+      }
+    }
+    await settlePage(page)
+    const outcome = await fetchUrlOnPage(page, url, {
+      navigate: false,
+      maxChars,
+      includeHtml: false,
+      wantShot,
+      timeoutMs: 20000,
+      shotDir,
+      log,
+    })
+    if (outcome.status === 'ok') outcome.verifiedViaHuman = true
+    return outcome
+  } finally {
+    try {
+      await browser.close()
+    } catch {
+      /* already closed */
+    }
+  }
 }
 
 /**
@@ -200,8 +295,11 @@ async function fetchUrlOnPage(page, url, o) {
  * @param {string}  [opts.profileDir]
  * @param {boolean} [opts.headless=true]
  * @param {boolean} [opts.noSandbox=true]
+ * @param {boolean} [opts.autoVerify=true]   if a site walls the page, open a visible window for the human
+ * @param {number}  [opts.verifyTimeoutMs=150000] how long to wait for the human to pass the challenge
  * @param {Function} [opts.log]
  * @returns {Promise<object>} outcome with status ok | error | blocked
+ *   (`verifiedViaHuman: true` when a human passed the challenge)
  */
 export async function fetchPage(url, opts = {}) {
   const env = process.env
@@ -220,10 +318,11 @@ export async function fetchPage(url, opts = {}) {
       message: `Could not launch Chrome: ${err && err.message ? err.message : String(err)}`,
     }
   }
+  let outcome
   try {
     const page = (await browser.pages())[0] || (await browser.newPage())
     log(`fetching: ${url}`)
-    return await fetchUrlOnPage(page, url, {
+    outcome = await fetchUrlOnPage(page, url, {
       maxChars: opts.maxChars ?? 8000,
       includeHtml: opts.includeHtml === true,
       wantShot: opts.screenshot === true,
@@ -238,6 +337,30 @@ export async function fetchPage(url, opts = {}) {
       /* already closed */
     }
   }
+
+  // Soft wall (anti-bot slider served in an empty shell) → hand it to the
+  // human in a visible window, like the Google CAPTCHA fallback. The headless
+  // browser is closed by now, so the visible one can take the profile.
+  if (isWall(outcome)) {
+    if (opts.autoVerify !== false) {
+      log('anti-bot wall detected — opening a visible window for the human')
+      outcome = await humanVerify(url, env, chromeOpts, shotDir, log, opts.verifyTimeoutMs ?? 150000, {
+        maxChars: opts.maxChars ?? 8000,
+        wantShot: opts.screenshot === true,
+      })
+    } else {
+      outcome = {
+        ...outcome,
+        status: 'blocked',
+        message:
+          'The page is behind a human-verification challenge (anti-bot), and verification is ' +
+          'disabled (autoVerify is off), so no visible window was opened. Re-run with ' +
+          'verification enabled (the default) to let the human pass it, or try a different ' +
+          'source for the same topic.',
+      }
+    }
+  }
+  return outcome
 }
 
 /**
@@ -305,14 +428,18 @@ export async function searchAndFetch(query, opts = {}) {
     }
   }
 
+  const autoVerify = opts.autoVerify !== false
+  const verifyTimeoutMs = opts.verifyTimeoutMs ?? 150000
   const pages = []
+  let sharedBrowser = browser
   try {
     for (const t of targets) {
       log(`fetching result: ${t.link}`)
-      const page = await browser.newPage().catch(() => null)
+      const page = await sharedBrowser.newPage().catch(() => null)
       if (!page) break
+      let p
       try {
-        const p = await fetchUrlOnPage(page, t.link, {
+        p = await fetchUrlOnPage(page, t.link, {
           maxChars: opts.maxChars ?? 8000,
           includeHtml: false,
           wantShot: false,
@@ -320,22 +447,47 @@ export async function searchAndFetch(query, opts = {}) {
           shotDir,
           log,
         })
-        pages.push({ url: t.link, title: t.title, snippet: t.snippet, ...p })
       } catch (err) {
-        pages.push({
-          url: t.link, title: t.title, snippet: t.snippet,
-          status: 'error', message: `Fetch failed: ${err && err.message ? err.message : String(err)}`,
-        })
+        p = {
+          status: 'error',
+          message: `Fetch failed: ${err && err.message ? err.message : String(err)}`,
+        }
       } finally {
         await page.close().catch(() => {})
       }
+      if (isWall(p) && autoVerify) {
+        log(`wall on ${t.link} — opening a visible window for the human`)
+        // One Chrome process per profile: hand the profile to the visible
+        // window while the human verifies, then re-open it for the rest.
+        try {
+          await sharedBrowser.close()
+        } catch {
+          /* already closed */
+        }
+        sharedBrowser = null
+        p = await humanVerify(t.link, env, chromeOpts, shotDir, log, verifyTimeoutMs, {
+          maxChars: opts.maxChars ?? 8000,
+        })
+        try {
+          sharedBrowser = await launchChrome({ headless: true }, env, chromeOpts)
+        } catch {
+          sharedBrowser = null
+        }
+        if (!sharedBrowser) break // cannot render the remaining pages
+      } else if (isWall(p)) {
+        p = {
+          ...p,
+          status: 'blocked',
+          message:
+            'The page is behind a human-verification challenge (anti-bot), and verification ' +
+            'is disabled (autoVerify is off). Re-run with verification enabled (the default) ' +
+            'to let the human pass it, or try a different source for the same topic.',
+        }
+      }
+      pages.push({ url: t.link, title: t.title, snippet: t.snippet, ...p })
     }
   } finally {
-    try {
-      await browser.close()
-    } catch {
-      /* already closed */
-    }
+    if (sharedBrowser) await sharedBrowser.close().catch(() => {})
   }
 
   return {

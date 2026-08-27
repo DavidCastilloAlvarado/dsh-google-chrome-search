@@ -181,7 +181,8 @@ server.registerTool(
       'Render a URL with the local Chrome browser and extract its readable main content ' +
       '(Mozilla Readability). Returns the article text (capped), title, byline, and the final ' +
       'URL after redirects. Use this to read any webpage in depth: docs, articles, pages found ' +
-      'via search or anywhere else. Sites with strong anti-bot protection may report "blocked".',
+      'via search or anywhere else. If a site serves a human-verification challenge (anti-bot ' +
+      'slider), a visible Chrome window is opened for the human to solve it (autoVerify).',
     inputSchema: {
       url: z.string().url().describe('The page URL to fetch (http/https).'),
       maxChars: z
@@ -199,6 +200,19 @@ server.registerTool(
         .boolean()
         .default(false)
         .describe('Also capture and attach a screenshot of the rendered page (default false).'),
+      autoVerify: z
+        .boolean()
+        .default(true)
+        .describe(
+          'If the site serves a human-verification challenge, open a visible Chrome window and wait for the human to solve it (default true).',
+        ),
+      verifyTimeoutMs: z
+        .number()
+        .int()
+        .min(5000)
+        .max(600000)
+        .default(150000)
+        .describe('How long (ms) to wait for the human to pass a page challenge (default 150000).'),
     },
   },
   async (args) =>
@@ -216,6 +230,8 @@ server.registerTool(
           maxChars: args.maxChars,
           includeHtml: args.includeHtml,
           screenshot: args.screenshot,
+          autoVerify: args.autoVerify,
+          verifyTimeoutMs: args.verifyTimeoutMs,
           log,
         })
       } catch (err) {
@@ -313,7 +329,14 @@ server.registerTool(
         .min(5000)
         .max(600000)
         .default(150000)
-        .describe('How long (ms) to wait for a human CAPTCHA in the search step (default 150000).'),
+        .describe('How long (ms) to wait for a human CAPTCHA/challenge (default 150000).'),
+      autoVerify: z
+        .boolean()
+        .default(true)
+        .describe(
+          'If Google or a result page serves a human-verification challenge, open a visible ' +
+          'Chrome window and wait for the human to solve it (default true).',
+        ),
     },
   },
   async (args) =>
@@ -334,6 +357,7 @@ server.registerTool(
           gl: args.gl,
           hl: args.hl,
           verifyTimeoutMs: args.verifyTimeoutMs,
+          autoVerify: args.autoVerify,
           log,
         })
       } catch (err) {
