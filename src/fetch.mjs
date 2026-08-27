@@ -51,7 +51,19 @@ const BLOCK_MARKERS = [
   'cf-browser-verification',
   'access denied',
   'request blocked',
+  'prove your humanity',
+  'complete the challenge below',
+  'not for bots',
 ]
+
+/** Hostname without the www prefix, or null if the URL cannot be parsed. */
+function hostOf(u) {
+  try {
+    return new URL(u).hostname.replace(/^www\./, '').toLowerCase()
+  } catch {
+    return null
+  }
+}
 
 function looksBlocked(finalUrl, title, bodyHead) {
   const t = `${title || ''} ${bodyHead || ''}`.toLowerCase()
@@ -152,7 +164,29 @@ async function fetchUrlOnPage(page, url, o) {
   if (o.navigate !== false) await settlePage(page)
   const raw = await extractFromPage(page)
 
-  if (looksBlocked(finalUrl, raw.title, raw.fullText.slice(0, 500))) {
+  // An off-host redirect to a short page (e.g. reddit.com bouncing to a
+  // support.reddithelp.com form) is a network-level bot block — report it as
+  // blocked instead of extracting the form as "content".
+  const offHost = hostOf(finalUrl) && hostOf(url) && hostOf(finalUrl) !== hostOf(url)
+  const blockedText = looksBlocked(finalUrl, raw.title, raw.fullText.slice(0, 500))
+  if (offHost && (blockedText || (raw.fullText || '').length < 1000)) {
+    const shot = wantShot ? await capture(page, shotDir, 'blocked') : null
+    return {
+      status: 'blocked',
+      url,
+      finalUrl,
+      title: raw.title,
+      text: raw.fullText.slice(0, 300),
+      screenshot: shot,
+      message:
+        `The site redirected to ${hostOf(finalUrl)} (typically a bot-block/support page). ` +
+        'This machine network/IP appears to be blocked by the site — verification in a ' +
+        'window usually cannot fix it. Try a different source for the same topic, or run ' +
+        'from a residential connection.',
+    }
+  }
+
+  if (blockedText) {
     const shot = wantShot ? await capture(page, shotDir, 'blocked') : null
     return {
       status: 'blocked',
@@ -184,7 +218,7 @@ async function fetchUrlOnPage(page, url, o) {
   }
   // An empty shell is the shape of a soft wall — keep a screenshot of it so the
   // caller can show it to the human / include it in the blocked report.
-  if ((source || '').trim().length < 200) {
+  if ((source || '').trim().length < 300) {
     outcome.screenshot = await capture(page, shotDir, 'wall').catch(() => null)
   }
   if (includeHtml) {
@@ -203,7 +237,7 @@ async function fetchUrlOnPage(page, url, o) {
  * challenge is drawn in an isolated frame.
  */
 function isWall(p) {
-  return p.status === 'ok' && (p.text || '').trim().length < 200
+  return p.status === 'ok' && (p.text || '').trim().length < 300
 }
 
 /**
@@ -234,6 +268,23 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
     } catch {
       /* the wall may intercept navigation — the challenge still renders */
     }
+    // Off-host redirect = network-level block; nothing the human can do in
+    // this window (e.g. Reddit bouncing to its support form). Report it now
+    // instead of waiting the full verify timeout.
+    if (hostOf(page.url() || url) && hostOf(page.url() || url) !== hostOf(url)) {
+      const shot = await capture(page, shotDir, 'wall').catch(() => null)
+      return {
+        status: 'blocked',
+        url,
+        finalUrl: page.url(),
+        screenshot: shot,
+        message:
+          `The site immediately redirected to ${hostOf(page.url())} (a bot-block/support page). ` +
+          "This machine's network/IP appears to be blocked by the site — solving anything in " +
+          'the window cannot fix it. Try a different source for the same topic, or run from a ' +
+          'residential connection.',
+      }
+    }
     log(`waiting up to ${verifyTimeoutMs}ms for the human to pass the challenge in the visible window`)
     const deadline = Date.now() + verifyTimeoutMs
     let solved = false
@@ -262,6 +313,21 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
       }
     }
     await settlePage(page)
+    if (hostOf(page.url() || url) && hostOf(page.url() || url) !== hostOf(url)) {
+      // The "challenge" turned out to be an off-host block redirect.
+      const shot = await capture(page, shotDir, 'wall').catch(() => null)
+      return {
+        status: 'blocked',
+        url,
+        finalUrl: page.url(),
+        screenshot: shot,
+        message:
+          `After the verification attempt the site redirected to ${hostOf(page.url())} ` +
+          '(a bot-block/support page). This machine network/IP appears to be blocked by the ' +
+          'site. Try a different source for the same topic, or run from a residential ' +
+          'connection.',
+      }
+    }
     const outcome = await fetchUrlOnPage(page, url, {
       navigate: false,
       maxChars,
