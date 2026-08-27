@@ -201,7 +201,13 @@ async function fetchUrlOnPage(page, url, o) {
     }
   }
 
-  const source = raw.readable ? raw.contentText : raw.fullText
+  // Compact the text: strip trailing line whitespace (HTML indentation from
+  // JS frontends like Reddit) and collapse blank-line runs. Leading
+  // indentation (e.g. code blocks) is preserved.
+  const source = ((raw.readable ? raw.contentText : raw.fullText) || '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
   const text = cap(source, maxChars)
   const outcome = {
     status: 'ok',
