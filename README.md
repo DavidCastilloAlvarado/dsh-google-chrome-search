@@ -24,14 +24,26 @@ tries to solve a CAPTCHA itself.
 | Core engine | `src/search.mjs` | Chrome/CDP Google search + CAPTCHA verification + result extraction |
 | Page engine | `src/fetch.mjs` | Render any URL + extract readable content (Mozilla Readability) + `search_and_fetch` |
 | MCP server | `src/server.mjs` | Exposes `search`, `fetch`, `search_and_fetch` over stdio → native `mcp__google__*` in DSH |
-| CLI | `bin/google-search.mjs` | `dsh-google-search "<query>"` and `dsh-google-search fetch "<url>"` for direct use |
+| CLI | `bin/google-search.mjs` | `dsh-google-search "<query>"`, `fetch "<url>"`, `install-browser`, `mcp` — direct use / npx |
 | Skill | `skill/SKILL.md` | Teaches the agent how to use it + the human-verification workflow |
+
+## Quick start (no install — npx)
+
+```sh
+npx dsh-google-chrome-search "nodejs streams" --max 8
+```
+
+That's it — no clone, no API key. The first run downloads the package (a few
+seconds, then cached). The browser is auto-detected from your system, or
+installed once with `npx dsh-google-chrome-search install-browser` (see below).
 
 ## Requirements
 
 - **Node.js ≥ 18** (tested on Node 22)
-- **A local Chrome/Chromium binary** (e.g. `google-chrome`, `chromium`). Auto-detected from
-  common paths; override with `CHROME_PATH` or `--chrome`.
+- **A Chrome/Chromium-family browser** (Chrome, Chromium, Brave, Edge — any
+  CDP-compatible browser). Auto-detected from common paths and `PATH`; override
+  with `CHROME_PATH` or `--chrome`. Or install the bundled **Chrome for
+  Testing** once: `npx dsh-google-chrome-search install-browser`.
 - For the visible-verification step, a desktop session with a display (so the Chrome
   window can be shown to the human). Headless/SSH can still detect the CAPTCHA and report
   it (with a screenshot).
@@ -44,15 +56,43 @@ cd dsh-google-chrome-search
 npm install
 ```
 
-Dependencies: `puppeteer-core` (drives *your* Chrome — it does **not** download a browser),
-`@modelcontextprotocol/sdk` (for the MCP server), `@mozilla/readability` (content extraction),
-and `zod` (schema validation).
+Dependencies: `puppeteer-core` (drives your browser over CDP), `@puppeteer/browsers`
+(used only by `install-browser` to fetch Chrome for Testing), `@modelcontextprotocol/sdk`
+(for the MCP server), `@mozilla/readability` (content extraction), and `zod` (schema
+validation).
 
 Optionally link the CLI globally so it is on `PATH`:
 
 ```sh
 npm link        # gives you: dsh-google-search "<query>"
 ```
+
+## Install a bundled browser (optional — self-contained setup)
+
+If the machine has **no browser at all**, download a dedicated **Chrome for
+Testing** build (latest stable, ~170 MB, one time) into the plugin's profile dir:
+
+```sh
+npx dsh-google-chrome-search install-browser
+# or with the repo checked out:
+node bin/google-search.mjs install-browser
+```
+
+It lands in `~/.dsh-chrome-google/browser/` (or under your `GSEARCH_PROFILE`) with a
+small marker file (`browser-info.json`). From then on the plugin uses it
+**automatically** when no other browser is configured — the resolution chain is:
+
+```
+--chrome flag → CHROME_PATH env → bundled Chrome for Testing → system paths (/usr/bin/…) → PATH
+```
+
+Notes:
+
+- `--force` re-downloads; it is a no-op while an install is present.
+- On a bare **headless Linux server** the system shared libraries may still be missing
+  (`libnss3`, `libgbm`, `libasound2`, …) — a normal desktop has them.
+- Removing it: delete the `browser/` folder and `browser-info.json` from the profile dir.
+- The visible-verification window needs a display either way (desktop, or Xvfb/VNC).
 
 ## Use the CLI
 
@@ -107,22 +147,26 @@ Pages are rendered **sequentially** (one browser, one page at a time) — expect
 
 ## Use it as a native DSH tool (MCP)
 
-Register the MCP server with DSH's `@deepseek-ai/dsh-mcp-client` in your profile config
-(example — adjust the `command` and `args` paths to your environment):
+Register the MCP server with DSH's `@deepseek-ai/dsh-mcp-client` in your profile config.
+**Zero-clone variant (recommended)** — `npx` fetches the package on demand, so this snippet
+works on any machine with Node:
 
 ```yaml
 - insert:
-    - id: mcp-google
+    - id: mcp-chinchilla-websearch
       name: '@deepseek-ai/dsh-mcp-client'
       config:
-        serverName: google
+        serverName: chinchilla-websearch
         transport: stdio
-        command: /path/to/node
-        args: [ /path/to/dsh-google-chrome-search/src/server.mjs ]
+        command: npx
+        args: [ "-y", "dsh-google-chrome-search", "mcp" ]
         env:
           CHROME_PATH: /usr/bin/google-chrome   # optional — auto-detected if unset
         toolCallTimeoutMs: 300000
 ```
+
+(Or, with the repo checked out, point at the files directly:
+`command: /path/to/node`, `args: [ /path/to/dsh-google-chrome-search/src/server.mjs ]`.)
 
 After a DSH restart, the agent gets three native tools:
 
@@ -160,7 +204,7 @@ and it just works).
 
 | Option / Env | Default | Meaning |
 |---|---|---|
-| `chromePath` / `CHROME_PATH` | auto-detect | Chrome executable |
+| `chromePath` / `CHROME_PATH` | auto-detect (bundled Chrome for Testing, then system paths, then `PATH`) | Chrome/Chromium-family executable |
 | `profileDir` / `GSEARCH_PROFILE` | `~/.dsh-chrome-google` | persistent, dedicated Chrome profile (keeps "verified" cookies) |
 | `maxResults` | 8 | organic results to return (max 20) |
 | `verifyTimeoutMs` | 150000 | how long to wait for the human to solve a CAPTCHA |
@@ -183,6 +227,26 @@ and it just works).
      If timed out → return `status: verification_required` with the latest screenshot.
 4. The verified session persists in the profile, so the next search usually succeeds headless.
 
+## Releasing (npm + GitHub release)
+
+Releases are manual and tokenless — the same methodology as
+`chinchilla-llm-router`. From the GitHub **Actions** tab, run the `release`
+workflow with an input like `v0.2.0`:
+
+1. **Before dispatching**: bump `version` in `package.json` to the release
+   version (CI never rewrites versions) and commit.
+2. The workflow validates the version format, checks it isn't already on npm,
+   refuses if the tag exists, runs the test suite, creates the GitHub release
+   (with the `npm pack` tarball attached), and publishes to npm.
+3. **npm auth is Trusted Publishing (OIDC)**: no token is stored. Set it up
+   once on npmjs.com:
+   - Create the `production` environment in this repo (Settings → Environments).
+   - On npmjs.com, add a **trusted publisher** for the package pointing at this
+     GitHub repo, scoped to the `production` environment.
+   - The `publish-npm` job runs in that environment; Node 24's npm 11 exchanges
+     the GitHub OIDC token for a short-lived registry token automatically
+     (`npm publish --provenance`).
+
 ## Testing
 
 ```sh
@@ -198,7 +262,7 @@ gracefully.
 
 | Symptom | Fix |
 |---|---|
-| `Could not find Chrome` / launch error | Install Chrome/Chromium or set `CHROME_PATH` / `--chrome` |
+| `Could not find Chrome` / launch error | Run `dsh-google-search install-browser`, or install Chrome/Chromium, or set `CHROME_PATH` / `--chrome` |
 | Runs as root in a container, sandbox error | The default is `--no-sandbox` (for isolation); if you want the sandbox on, pass `noSandbox: false` |
 | CAPTCHA on every search | Keep the dedicated profile (`~/.dsh-chrome-google`) — deleting it resets the "verified" cookies. Datacenter IPs get CAPTCHAs more often. |
 | No visible window appears on SSH | Use a machine with a display, or set `autoVerify: false` and solve the CAPTCHA manually in the printed screenshot's browser context. |
@@ -209,9 +273,9 @@ gracefully.
 
 ## Revert / clean up
 
-- Config: remove the `mcp-google` entry from your DSH profile config.
+- Config: remove the `mcp-chinchilla-websearch` entry from your DSH profile config.
 - Skill: `rm -rf ~/.dsh/skills/google-chrome-search`
-- Profile/screenshots: `rm -rf ~/.dsh-chrome-google`
+- Profile/screenshots (and any bundled browser): `rm -rf ~/.dsh-chrome-google`
 
 ## License
 

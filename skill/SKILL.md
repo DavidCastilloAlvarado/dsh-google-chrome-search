@@ -31,6 +31,10 @@ Useful options:
 - `--no-verify` do NOT open a visible window; just report that verification is required
 - `--verify-timeout <ms>` how long to wait for the human to solve a CAPTCHA (default 150000)
 
+If the machine has no browser (`Could not find Chrome`), install the bundled
+Chrome for Testing once with `dsh-google-search install-browser` (or
+`node <INSTALL_DIR>/bin/google-search.mjs install-browser`), then retry.
+
 If the MCP bridge is registered in the running DSH host, prefer the native tools
 `mcp__chinchilla-websearch__search`, `mcp__chinchilla-websearch__fetch`, and
 `mcp__chinchilla-websearch__search_and_fetch` (same

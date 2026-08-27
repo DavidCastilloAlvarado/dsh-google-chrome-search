@@ -1,0 +1,134 @@
+name: release
+
+# Manual release: run from the Actions tab (or `gh workflow run release
+# -f version=vX.Y.Z`). The version input is validated against the required
+# format, and the tag is created by the release step — you never push tags
+# by hand. Before dispatching, prepare package.json: bump `version` above the
+# latest npm publish — the workflow validates that up front and fails fast if
+# it isn't. CI never rewrites versions.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version — must match v<major>.<minor>.<patch> (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write   # OIDC token for npm Trusted Publishing (no stored secret)
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.inputs.version }}
+      PKG: dsh-google-chrome-search
+    steps:
+      - name: Validate version format
+        run: |
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$VERSION' is not a valid release version — required format: v<major>.<minor>.<patch> (e.g. v0.1.0)"
+            exit 1
+          fi
+          echo "version format OK: $VERSION"
+
+      - uses: actions/checkout@v4
+
+      # Fail fast if package.json isn't prepared for this release: the version
+      # must not already be published on npm, and must be newer than anything
+      # already published. Versions are set by hand in package.json before dispatch.
+      - name: Validate package.json for this release
+        run: |
+          TAG_VERSION="${VERSION#v}"
+          PUBLISHED=$(npm view "$PKG" versions --json 2>/dev/null || echo '[]')
+          TAG_VERSION="$TAG_VERSION" PUBLISHED="$PUBLISHED" node - <<'EOF'
+          const fs = require('fs');
+          const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const tag = process.env.TAG_VERSION;
+          const published = JSON.parse(process.env.PUBLISHED || '[]');
+          const num = (v) => v.split('.').map(Number);
+          const cmp = (a, b) => {
+            a = num(a); b = num(b);
+            for (let i = 0; i < 3; i++) if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) - (b[i] || 0);
+            return 0;
+          };
+          const errors = [];
+          if (p.version !== tag) {
+            errors.push(`package.json version is '${p.version}' but this release is v${tag} — set "version" to '${tag}'`);
+          }
+          if (published.includes(p.version)) {
+            errors.push(`version '${p.version}' is already published on npm — bump the version field`);
+          } else if (published.some((v) => cmp(p.version, v) < 0)) {
+            errors.push(`version '${p.version}' is older than published versions (${published.sort((x, y) => cmp(x, y)).join(', ')}) — bump the version field`);
+          }
+          if (errors.length) {
+            for (const e of errors) console.error(`::error::package.json is not ready for release v${tag}: ${e}`);
+            console.error('::error::Fix package.json, commit, and re-dispatch the release.');
+            process.exit(1);
+          }
+          console.log(`package.json OK: version=${p.version} (npm published: ${published.length ? published.join(', ') : 'none'})`);
+          EOF
+
+      - name: Reject if tag already exists
+        run: |
+          if git ls-remote --tags origin "refs/tags/$VERSION" | grep -q "refs/tags/$VERSION"; then
+            echo "::error::Tag $VERSION already exists — delete the existing release first, or pick a new version"
+            exit 1
+          fi
+          echo "tag $VERSION is free"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: |
+          for f in bin/*.mjs src/*.mjs test-mcp.mjs; do
+            node --check "$f"
+          done
+
+      - name: Smoke test (MCP server)
+        run: npm test
+
+      - name: Pack npm package
+        run: npm pack --pack-destination dist
+
+      - name: Publish GitHub release (creates the tag)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          files: |
+            dist/*.tgz
+          generate_release_notes: true
+
+  # Publish the npm package exactly as committed — the version was validated
+  # up front in release, so this job never rewrites package.json. Auth is npm
+  # Trusted Publishing (OIDC): with `id-token: write`, npm 11 (Node 24) fetches
+  # the GitHub OIDC token itself and exchanges it for a short-lived registry
+  # token — no token/secret stored. The publisher registered on npmjs.com is
+  # scoped to the `production` environment, so this job runs in it (create it
+  # under repo Settings → Environments if it doesn't exist yet).
+  publish-npm:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24 ships npm 11, whose `publish` command automatically picks up
+      # the runner's OIDC token (id-token: write) and exchanges it for a
+      # short-lived npm registry token. npm 10 (Node 22) does not do this and
+      # fails with ENEEDAUTH.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Publish npm package
+        run: |
+          # --loglevel verbose: if the automatic OIDC flow is ever skipped or
+          # fails, the reason is printed here instead of a bare ENEEDAUTH.
+          npm publish --access public --provenance --loglevel verbose

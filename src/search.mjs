@@ -18,15 +18,24 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import puppeteer from 'puppeteer-core'
+import { findBundledBrowser } from './browser.mjs'
 
 // ---------------------------------------------------------------------------
 // Configuration (overridable via env or options)
 // ---------------------------------------------------------------------------
 
-/** Resolve the Chrome/Chromium executable to drive. */
+/**
+ * Resolve the Chrome/Chromium executable to drive.
+ *
+ * Chain: --chrome flag → CHROME_PATH env → bundled Chrome for Testing
+ * (installed via `install-browser` into the profile dir) → well-known system
+ * install paths → bare-name passthrough (PATH lookup on POSIX).
+ */
 export function resolveChromePath(env = process.env, opts = {}) {
   if (opts.chromePath) return opts.chromePath
   if (env.CHROME_PATH) return env.CHROME_PATH
+  const bundled = findBundledBrowser(opts.profileDir || defaultProfileDir())
+  if (bundled) return bundled
   const candidates = [
     '/usr/bin/google-chrome',
     '/usr/bin/google-chrome-stable',
@@ -286,9 +295,40 @@ function screenshotPath(dir, tag) {
  * Launch Chrome (headless or visible) on the dedicated persistent profile.
  * @param {{headless:boolean, log?:Function}} o
  */
+/**
+ * Remove stale Chrome singleton files (SingletonLock/Socket/Cookie) when no
+ * live process is using the profile. A stale SingletonSocket can make a new
+ * Chrome hang for a long time while it probes for the "existing instance".
+ * (Linux-only: other platforms resolve stale locks fine on their own.)
+ */
+function cleanStaleSingleton(profile) {
+  if (process.platform !== 'linux') return
+  try {
+    const inUse = fs.readdirSync('/proc').some((pid) => {
+      if (!/^\d+$/.test(pid)) return false
+      try {
+        return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(profile)
+      } catch {
+        return false
+      }
+    })
+    if (inUse) return
+  } catch {
+    return
+  }
+  for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+    try {
+      fs.rmSync(path.join(profile, f), { force: true })
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 export async function launchChrome(o, env, opts) {
   const profile = opts.profileDir || defaultProfileDir()
   fs.mkdirSync(profile, { recursive: true })
+  cleanStaleSingleton(profile)
   const log = o.log || (() => {})
   const args = [
     '--no-first-run',

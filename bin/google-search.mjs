@@ -5,7 +5,17 @@
  * Usage:
  *   dsh-google-search "<query>" [options]
  *   dsh-google-search fetch "<url>" [options]
+ *   dsh-google-search install-browser [--force]
+ *   dsh-google-search mcp
  *   node bin/google-search.mjs "<query>" [options]
+ *
+ * install-browser options:
+ *   --force              re-download even if a bundled browser is already installed
+ *   --profile <dir>      profile dir to install into (default: $GSEARCH_PROFILE or ~/.dsh-chrome-google)
+ *
+ * mcp:
+ *   Run the MCP stdio server (search / fetch / search_and_fetch tools).
+ *   This is the entry point for DSH/MCP registration via npx.
  *
  * Search options:
  *   --max <n>              max organic results (default 8)
@@ -35,6 +45,7 @@
 
 import { googleSearch, defaultProfileDir } from '../src/search.mjs'
 import { fetchPage, searchAndFetch } from '../src/fetch.mjs'
+import { installBrowser } from '../src/browser.mjs'
 
 function parseArgs(argv) {
   const opts = {}
@@ -85,6 +96,9 @@ function parseArgs(argv) {
         break
       case '--json':
         opts.json = true
+        break
+      case '--force':
+        opts.force = true
         break
       case '--chrome':
         opts.chromePath = next()
@@ -170,7 +184,10 @@ function printSearchAndFetch(o) {
 async function main() {
   const argv = process.argv.slice(2)
   const isFetch = argv[0] === 'fetch'
-  const opts = parseArgs(isFetch ? argv.slice(1) : argv)
+  const isInstallBrowser = argv[0] === 'install-browser'
+  const isMcp = argv[0] === 'mcp'
+  const sub = isFetch || isInstallBrowser || isMcp
+  const opts = parseArgs(sub ? argv.slice(1) : argv)
 
   const text =
     'dsh-google-search — Google web search + page content extraction via the local Chrome\n' +
@@ -178,8 +195,10 @@ async function main() {
     'Usage:\n' +
     '  dsh-google-search "<query>" [options]\n' +
     '  dsh-google-search fetch "<url>" [options]\n' +
+    '  dsh-google-search install-browser [--force]   download Chrome for Testing (self-contained setup)\n' +
+    '  dsh-google-search mcp                         run the MCP stdio server\n' +
     'See header comment for options.\n'
-  if (opts.help || (!opts.query && !isFetch)) {
+  if (opts.help || (!opts.query && !sub)) {
     if (opts.help) console.log(text)
     else process.stderr.write(text)
     process.exit(opts.help ? 0 : 64)
@@ -190,6 +209,35 @@ async function main() {
       process.stderr.write(`[${new Date().toISOString()}] ${msg}\n`)
     } catch {
       /* ignore */
+    }
+  }
+
+  if (isMcp) {
+    // The MCP stdio server connects itself on import and stays alive.
+    await import('../src/server.mjs')
+    return
+  }
+
+  if (isInstallBrowser) {
+    try {
+      const res = await installBrowser({
+        profileDir: opts.profileDir || defaultProfileDir(),
+        force: !!opts.force,
+        log,
+      })
+      if (res.installed) {
+        console.log(`Installed Chrome for Testing ${res.buildId} (${res.platform}):`)
+        console.log(`  ${res.executablePath}`)
+        console.log('\nIt will be used automatically when no other browser is configured.')
+        console.log('To remove it, delete the "browser" folder and browser-info.json inside the profile dir.')
+      } else {
+        console.log(`Bundled browser already installed:`)
+        console.log(`  ${res.executablePath}`)
+      }
+      process.exit(0)
+    } catch (err) {
+      process.stderr.write(`Error: ${err && err.message ? err.message : String(err)}\n`)
+      process.exit(1)
     }
   }
 

@@ -222,9 +222,9 @@ async function fetchUrlOnPage(page, url, o) {
     textLength: source.length,
     screenshot: null,
   }
-  // An empty shell is the shape of a soft wall — keep a screenshot of it so the
-  // caller can show it to the human / include it in the blocked report.
-  if ((source || '').trim().length < 300) {
+  // A near-empty shell is the shape of a soft wall — keep a screenshot of it so
+  // the caller can show it to the human / include it in the blocked report.
+  if (isWall(outcome)) {
     outcome.screenshot = await capture(page, shotDir, 'wall').catch(() => null)
   }
   if (includeHtml) {
@@ -242,8 +242,24 @@ async function fetchUrlOnPage(page, url, o) {
  * shell. Marker-based detection (looksBlocked) misses these because the
  * challenge is drawn in an isolated frame.
  */
+/**
+ * Weak signals that a short, marker-free page is a bot-challenge shell rather
+ * than a genuinely short legitimate page (a one-paragraph status page, etc.).
+ */
+const WALL_HINTS = [
+  'human', 'robot', 'captcha', 'challenge', 'verification', 'verify',
+  'checking', 'please wait', 'security check', 'blocked', 'unusual',
+  'unavailable', 'access to this', 'not for bots',
+]
+
 function isWall(p) {
-  return p.status === 'ok' && (p.text || '').trim().length < 300
+  if (p.status !== 'ok') return false
+  const text = (p.text || '').trim()
+  if (text.length >= 300) return false
+  // A near-empty shell (< 20 chars) is still treated as a wall: the challenge
+  // is usually drawn in an isolated frame and yields no text at all.
+  if (text.length < 20) return true
+  return WALL_HINTS.some((h) => text.toLowerCase().includes(h))
 }
 
 /**
@@ -257,7 +273,7 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
   const { maxChars = 8000, wantShot = false } = extra
   let browser
   try {
-    browser = await launchChrome({ headless: false }, env, chromeOpts)
+    browser = await launchChrome({ headless: false, log }, env, chromeOpts)
   } catch (err) {
     return {
       status: 'blocked',
@@ -382,7 +398,7 @@ export async function fetchPage(url, opts = {}) {
 
   let browser
   try {
-    browser = await launchChrome({ headless: opts.headless !== false }, env, chromeOpts)
+    browser = await launchChrome({ headless: opts.headless !== false, log }, env, chromeOpts)
   } catch (err) {
     return {
       status: 'error',
