@@ -32,7 +32,8 @@ Useful options:
 - `--verify-timeout <ms>` how long to wait for the human to solve a CAPTCHA (default 150000)
 
 If the MCP bridge is registered in the running DSH host, prefer the native tools
-`mcp__google__search`, `mcp__google__fetch`, and `mcp__google__search_and_fetch` (same
+`mcp__chinchilla-websearch__search`, `mcp__chinchilla-websearch__fetch`, and
+`mcp__chinchilla-websearch__search_and_fetch` (same
 behavior, return results as tool output). They are registered via
 `@deepseek-ai/dsh-mcp-client` in the DSH profile config and become visible to the agent
 after a DSH (re)start.
