@@ -55,12 +55,14 @@ await client.connect(transport)
 const tools = await client.listTools()
 const names = tools.tools.map((t) => t.name)
 console.log('TOOLS:', JSON.stringify(names))
-if (!names.includes('search')) {
-  console.error('FAIL: `search` tool not listed by the MCP server')
-  await client.close()
-  process.exit(1)
+for (const expected of ['search', 'fetch', 'search_and_fetch']) {
+  if (!names.includes(expected)) {
+    console.error(`FAIL: \`${expected}\` tool not listed by the MCP server`)
+    await client.close()
+    process.exit(1)
+  }
 }
-console.log('OK: MCP server lists the `search` tool')
+console.log('OK: MCP server lists the search, fetch, and search_and_fetch tools')
 
 if (!chrome) {
   console.log('SKIP: no Chrome/Chromium found — skipping the live search call (CI mode)')

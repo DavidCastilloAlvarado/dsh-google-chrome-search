@@ -3,13 +3,14 @@ name: google-chrome-search
 description: Use when the user asks to search Google, do a web search, look something up on Google, or find pages/news/links by running a real Google search. Drives the local Chrome browser over CDP. Falls back to asking the human to solve a CAPTCHA when Google serves a human-verification page.
 ---
 
-# Google search via the local Chrome
+# Google search + page reading via the local Chrome
 
-Search Google by driving the machine's installed Chrome over CDP. This is different
-from an API-backed search: it runs a real browser, so it works when no search API key
-is configured. Google frequently serves a human-verification (CAPTCHA) page for
-automated/datacenter traffic; when that happens, this skill asks the human to solve it
-in a visible Chrome window and then retries.
+Search Google by driving the machine's installed Chrome over CDP, and read any page by
+rendering it and extracting its content. This is different from an API-backed search:
+it runs a real browser, so it works when no search API key is configured. Google
+frequently serves a human-verification (CAPTCHA) page for automated/datacenter traffic;
+when that happens, this skill asks the human to solve it in a visible Chrome window and
+then retries.
 
 ## How to run a search
 
@@ -30,10 +31,38 @@ Useful options:
 - `--no-verify` do NOT open a visible window; just report that verification is required
 - `--verify-timeout <ms>` how long to wait for the human to solve a CAPTCHA (default 150000)
 
-If the MCP bridge is registered in the running DSH host, prefer the native tool
-`mcp__google__search` (same behavior, returns results as tool output). It is registered
-via `@deepseek-ai/dsh-mcp-client` in the DSH profile config and becomes visible to the
-agent after a DSH (re)start.
+If the MCP bridge is registered in the running DSH host, prefer the native tools
+`mcp__google__search`, `mcp__google__fetch`, and `mcp__google__search_and_fetch` (same
+behavior, return results as tool output). They are registered via
+`@deepseek-ai/dsh-mcp-client` in the DSH profile config and become visible to the agent
+after a DSH (re)start.
+
+## Reading a page (fetch)
+
+Use this when the search snippets are not enough and the user needs the **content** of a
+page. Two forms:
+
+```sh
+# Render + extract one URL:
+node <INSTALL_DIR>/bin/google-search.mjs fetch "<url>" --max-chars 8000
+
+# Search, then render + extract the top N result pages in one call:
+node <INSTALL_DIR>/bin/google-search.mjs "<query>" --max 8 --fetch-top 3
+```
+
+Options: `--max-chars <n>` (default 8000), `--html` (also print extracted HTML),
+`--screenshot` (also save a page screenshot), `--timeout <ms>` (default 20000).
+
+Behavior notes:
+- Extraction uses Mozilla Readability: you get the article body (title, byline, text),
+  not the whole page. Non-article pages fall back to full page text.
+- The page is rendered in the same dedicated profile as the search — consistent
+  fingerprint, never the user's real browser.
+- Exit 3 can mean the page was **blocked by an anti-bot wall** (the output says
+  `FETCH BLOCKED`) or that the search yielded no results. When blocked, fetch a
+  different source for the same topic instead of retrying.
+- Pages render sequentially (~1–3 s each). Don't run two commands at once — one
+  Chrome process per profile.
 
 ## Interpreting the result
 

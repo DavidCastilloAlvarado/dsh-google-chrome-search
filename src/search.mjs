@@ -286,7 +286,7 @@ function screenshotPath(dir, tag) {
  * Launch Chrome (headless or visible) on the dedicated persistent profile.
  * @param {{headless:boolean, log?:Function}} o
  */
-async function launchChrome(o, env, opts) {
+export async function launchChrome(o, env, opts) {
   const profile = opts.profileDir || defaultProfileDir()
   fs.mkdirSync(profile, { recursive: true })
   const log = o.log || (() => {})
@@ -316,7 +316,7 @@ async function launchChrome(o, env, opts) {
 /**
  * Take a screenshot of the current page, returning the saved file path.
  */
-async function capture(page, dir, tag) {
+export async function capture(page, dir, tag) {
   try {
     const p = screenshotPath(dir, tag)
     await page.screenshot({ path: p, fullPage: false })
