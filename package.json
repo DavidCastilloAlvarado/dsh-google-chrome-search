@@ -7,7 +7,7 @@
   "author": "David Castillo Alvarado <dcastilloa@uni.pe>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/davidcastilloalvarado/dsh-google-chrome-search.git"
+    "url": "https://github.com/DavidCastilloAlvarado/dsh-google-chrome-search"
   },
   "homepage": "https://github.com/davidcastilloalvarado/dsh-google-chrome-search#readme",
   "bugs": {
