@@ -95,7 +95,10 @@ jobs:
         run: npm test
 
       - name: Pack npm package
-        run: npm pack --pack-destination dist
+        run: |
+          # npm pack does not create --pack-destination — the dir must exist.
+          mkdir -p dist
+          npm pack --pack-destination dist
 
       - name: Publish GitHub release (creates the tag)
         uses: softprops/action-gh-release@v2
