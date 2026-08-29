@@ -84,15 +84,25 @@ for (const c of res.content) {
   }
   if (c.type === 'image') console.log('IMAGE: (screenshot, ' + c.data.length + ' b64 chars)')
 }
-// "Organic results" is always present in a successful search; "AI Overview" is
-// intermittent (Google only shows it for some queries / A-B variants), so it is
-// reported but not required.
-if (!textOut.includes('Organic results')) {
-  console.error('FAIL: search output is missing the "Organic results" section')
+// A live search can end in two valid ways:
+//   - organic results (output contains "Organic results"), or
+//   - Google serves a CAPTCHA (typical on CI / data-center IPs) — the tool
+//     reports "Google requires human verification…".
+// The server is healthy in both cases, so both are OK; only fail when the
+// tool produced neither (i.e. it did not run properly). "AI Overview" is
+// intermittent (Google shows it for some queries only) and is never required.
+const hasResults = textOut.includes('Organic results')
+const hasVerification = /Google requires human verification/i.test(textOut)
+if (!hasResults && !hasVerification) {
+  console.error('FAIL: search output has neither "Organic results" nor a verification notice — the search tool did not run properly')
   await client.close()
   process.exit(1)
 }
-console.log('OK: search output contains the "Organic results" section')
-console.log(textOut.includes('AI Overview') ? 'INFO: "AI Overview" section was present' : 'INFO: no "AI Overview" for this query (expected for some queries)')
+console.log(hasResults
+  ? 'OK: search output contains the "Organic results" section'
+  : 'OK: Google served a CAPTCHA (expected on CI / data-center IPs) — verification notice present')
+if (hasResults) {
+  console.log(textOut.includes('AI Overview') ? 'INFO: "AI Overview" section was present' : 'INFO: no "AI Overview" for this query (expected for some queries)')
+}
 await client.close()
 process.exit(0)
