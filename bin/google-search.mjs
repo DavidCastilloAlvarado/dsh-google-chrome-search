@@ -29,6 +29,7 @@
  *   --headless/--headed    force the first attempt to be headless (default) or visible
  *   --fetch-top <n>        after the search, render and extract the top N result pages (0 = off, max 5)
  *   --fetch-max-chars <n>  max characters of extracted text per page (default 8000)
+ *   --pdf-pages <n>        for PDF pages, how many pages to capture as images (default 2, max 16)
  *   --no-ai-overview       skip capturing Google's AI Overview (answer + cited references)
  *   --json                 print the raw JSON outcome
  *   --chrome <path>        Chrome executable path
@@ -54,9 +55,14 @@
  *   --no-verify            if the site serves a human-verification challenge, do NOT open
  *                          a visible window — just report "blocked"
  *   --verify-timeout <ms>  how long to wait for the human to pass a page challenge (default 150000)
+ *   --pdf-pages <n>        for PDF URLs, how many pages to capture as images (default 2, max 16)
  *   --json                 print the raw JSON outcome
  *   --chrome <path>        Chrome executable path
  *   --profile <dir>        persistent Chrome profile dir
+ *
+ * PDF URLs are detected and never treated as a bot-wall: the first N pages are
+ * captured as images in <profile>/screenshots (read them as images — PDFs cannot
+ * be text-extracted here) and the file is downloaded to <profile>/downloads.
  */
 
 import { readFileSync } from 'node:fs'
@@ -107,6 +113,9 @@ function parseArgs(argv) {
         break
       case '--fetch-max-chars':
         opts.fetchMaxChars = parseInt(next(), 10)
+        break
+      case '--pdf-pages':
+        opts.pdfPages = parseInt(next(), 10)
         break
       case '--no-ai-overview':
         opts.aiOverview = false
@@ -204,6 +213,18 @@ function printFetch(p) {
     return
   }
   console.log(`URL: ${p.finalUrl || p.url}`)
+  if (p.pdf) {
+    console.log('Type: PDF document (read the images, not text-extracted)')
+    for (const [i, s] of (p.pdfShots || []).entries()) {
+      console.log(`Page ${i + 1} image: ${s}`)
+    }
+    if (p.pdfPath) {
+      console.log(`Full file: ${p.pdfPath}${p.pdfSize ? ` (${(p.pdfSize / 1024).toFixed(1)} KB)` : ''}`)
+    }
+    if (p.verifiedViaHuman) console.log('Verified via human')
+    if (p.message) console.log(`\n${p.message}`)
+    return
+  }
   console.log(`Title: ${p.title || '(untitled)'}`)
   if (p.byline) console.log(`By: ${p.byline}`)
   if (p.siteName) console.log(`Site: ${p.siteName}`)
@@ -357,6 +378,7 @@ async function main() {
         timeoutMs: opts.timeoutMs,
         autoVerify: opts.autoVerify,
         verifyTimeoutMs: opts.verifyTimeoutMs,
+        pdfPages: opts.pdfPages,
         chromePath: opts.chromePath,
         profileDir: opts.profileDir,
         log,
@@ -370,6 +392,7 @@ async function main() {
         hl: opts.hl,
         verifyTimeoutMs: opts.verifyTimeoutMs,
         autoVerify: opts.autoVerify,
+        pdfPages: opts.pdfPages,
         aiOverview: opts.aiOverview,
         chromePath: opts.chromePath,
         profileDir: opts.profileDir,

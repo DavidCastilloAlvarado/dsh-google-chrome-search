@@ -1,6 +1,6 @@
 {
   "name": "dsh-google-chrome-search",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Google web search + page content extraction for AI agents: drives your local Chrome over CDP (no API key) with a human-verification (CAPTCHA) fallback. Ships as a CLI, an MCP stdio server, and a DSH skill.",
   "type": "module",
   "license": "MIT",
@@ -59,5 +59,8 @@
     "@puppeteer/browsers": "^3.2.1",
     "puppeteer-core": "^24.0.0",
     "zod": "^3.25.0 || ^4.0.0"
+  },
+  "optionalDependencies": {
+    "pdf-to-img": "^6.3.0"
   }
 }

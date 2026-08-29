@@ -19,6 +19,8 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
+import { execFile, execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import {
   googleSearch,
@@ -77,6 +79,276 @@ function cap(s, n) {
     return { text: `${text.slice(0, n)}\n… [truncated — ${text.length - n} more characters]`, truncated: true }
   }
   return { text, truncated: false }
+}
+
+// ---------------------------------------------------------------------------
+// PDF handling
+//
+// Chrome renders PDFs with the built-in PDFium viewer, whose page is an EMPTY
+// document (no body text, no embed/iframe, no title) in both headless-new and
+// visible mode. That empty shape is exactly what the wall heuristics mistake
+// for an anti-bot challenge — so a PDF is detected explicitly and never falls
+// through to the wall / human-verify path. When the PDF is detected, its bytes
+// are fetched with the browser session's own cookies (a plain GET carries the
+// verification cookie the human earned) and saved to the profile's downloads
+// dir; PDFs cannot be text-extracted by Readability.
+// ---------------------------------------------------------------------------
+
+const PDF_UA =
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
+/** True if the URL path ends in .pdf (case-insensitive). */
+function isPdfUrl(u) {
+  try {
+    return decodeURIComponent(new URL(u).pathname).toLowerCase().endsWith('.pdf')
+  } catch {
+    return false
+  }
+}
+
+/** A safe file name for a downloaded PDF, derived from the URL. */
+function pdfFileName(u, fallback) {
+  try {
+    const raw = decodeURIComponent(new URL(u).pathname).split('/').filter(Boolean).pop() || ''
+    const name = (raw || 'document').replace(/[^\w.-]+/g, '-').slice(0, 120)
+    return /\.pdf$/i.test(name) ? name : `${name}.pdf`
+  } catch {
+    return fallback
+  }
+}
+
+/** Write the PDF bytes into `dir` (unique name on collision), return the path. */
+function savePdfFile(dir, name, buf) {
+  fs.mkdirSync(dir, { recursive: true })
+  let p = path.join(dir, name)
+  let i = 1
+  while (fs.existsSync(p)) {
+    p = path.join(dir, `${path.basename(name, '.pdf')}-${i++}.pdf`)
+  }
+  fs.writeFileSync(p, buf)
+  return p
+}
+
+/**
+ * Download the PDF at `pdfUrl` using the page's own session cookies, so a
+ * verification cookie the human earned is sent along. Returns
+ * { ok: true, path, size } or { ok: false, reason }.
+ */
+async function downloadPdf(page, pdfUrl, downloadDir, log) {
+  try {
+    const cookies = await page.cookies(pdfUrl).catch(() => [])
+    const headers = {
+      'user-agent': PDF_UA,
+      accept: 'application/pdf,*/*;q=0.8',
+      'accept-language': 'en-US,en;q=0.9',
+    }
+    if (cookies.length > 0) headers.cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ')
+    const cur = page.url() || ''
+    if (cur && /^https?:/.test(cur) && cur !== pdfUrl) headers.referer = cur
+    const res = await fetch(pdfUrl, { headers, redirect: 'follow' })
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` }
+    if (!buf.subarray(0, 5).toString('latin1').startsWith('%PDF')) {
+      return { ok: false, reason: 'the server did not return a PDF (likely still a challenge page)' }
+    }
+    const p = savePdfFile(downloadDir, pdfFileName(pdfUrl, `document-${Date.now()}.pdf`), buf)
+    log(`downloaded PDF (${buf.length} bytes) -> ${p}`)
+    return { ok: true, path: p, size: buf.length }
+  } catch (err) {
+    log(`PDF download failed: ${err && err.message ? err.message : String(err)}`)
+    return { ok: false, reason: err && err.message ? err.message : String(err) }
+  }
+}
+
+// --- PDF page → image rendering (the primary read path) -------------------
+//
+// The agent reads page images (no text extraction — immune to weird
+// encodings and scanned pages). Rendering is tried in three tiers:
+//   1. system `pdftoppm` (poppler-utils) — best, zero npm deps;
+//   2. `pdf-to-img` (optional npm dep: pdfjs + node-canvas) — covers
+//      machines without poppler (e.g. a fresh Mac);
+//   3. screenshots of Chrome's PDFium viewer — always works, no deps.
+//    (The viewer can only be turned with a real click + PageDown: key
+//     events without focus are ignored and leave it stuck on page 1.)
+
+let pdftoppmOk = null
+function hasPdftoppm() {
+  if (pdftoppmOk === null) {
+    try {
+      execFileSync('pdftoppm', ['-v'], { stdio: 'ignore', timeout: 5000 })
+      pdftoppmOk = true
+    } catch {
+      pdftoppmOk = false
+    }
+  }
+  return pdftoppmOk
+}
+
+let pdfToImgMod = null
+let pdfToImgTried = false
+async function loadPdfToImg() {
+  if (pdfToImgTried) return pdfToImgMod
+  pdfToImgTried = true
+  try {
+    pdfToImgMod = await import('pdf-to-img')
+  } catch {
+    pdfToImgMod = null // optional dep missing or native build failed
+  }
+  return pdfToImgMod
+}
+
+/**
+ * Render the first `n` pages of a downloaded PDF file to PNG images in
+ * `shotDir` (named `pdf-<ts>-p<k>.png`). Returns [] when no renderer is
+ * available (the caller then falls back to viewer screenshots).
+ */
+async function pdfToPageImages(pdfPath, n, shotDir, log) {
+  const count = Math.max(1, Math.min(Math.trunc(Number(n)) || 2, 16))
+  const ts = Date.now()
+  fs.mkdirSync(shotDir, { recursive: true })
+
+  if (hasPdftoppm()) {
+    const prefix = path.join(shotDir, `pdf-${ts}`)
+    const ok = await new Promise((resolve) => {
+      execFile(
+        'pdftoppm',
+        ['-png', '-r', '150', '-f', '1', '-l', String(count), pdfPath, prefix],
+        { timeout: 60000 },
+        (err) => resolve(!err),
+      )
+    })
+    if (ok) {
+      const base = path.basename(prefix)
+      const files = fs
+        .readdirSync(shotDir)
+        .filter((f) => f.startsWith(base + '-') && f.endsWith('.png'))
+        .sort((a, b) => Number(a.slice(base.length + 1, -4)) - Number(b.slice(base.length + 1, -4)))
+      const shots = files.map((f, i) => {
+        const dest = path.join(shotDir, `pdf-${ts}-p${i + 1}.png`)
+        fs.renameSync(path.join(shotDir, f), dest)
+        return dest
+      })
+      if (shots.length > 0) {
+        log(`rendered ${shots.length} PDF page image(s) with pdftoppm`)
+        return shots
+      }
+    }
+    log('pdftoppm did not render the PDF — trying pdf-to-img')
+  }
+
+  const mod = await loadPdfToImg()
+  if (mod) {
+    let doc
+    try {
+      doc = await mod.pdf(pdfPath, { scale: 2 }) // 72 DPI x 2 ≈ 144
+      const shots = []
+      for (let k = 1; k <= count; k++) {
+        const buf = await doc.getPage(k)
+        if (!buf) break // beyond the last page
+        const dest = path.join(shotDir, `pdf-${ts}-p${k}.png`)
+        fs.writeFileSync(dest, buf)
+        shots.push(dest)
+      }
+      if (shots.length > 0) {
+        log(`rendered ${shots.length} PDF page image(s) with pdf-to-img`)
+        return shots
+      }
+    } catch (err) {
+      log(`pdf-to-img failed: ${err && err.message ? err.message : err}`)
+    } finally {
+      try {
+        doc && doc.destroy()
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return []
+}
+
+/**
+ * Fallback tier: screenshot the PDF pages as shown in Chrome's PDFium
+ * viewer. The viewer needs a real click to take keyboard focus before
+ * PageDown turns a page (otherwise it stays stuck on page 1); a
+ * pixel-identical screenshot means the document has no more pages.
+ * Returns the list of image paths (possibly empty).
+ */
+async function viewerPageImages(page, shotDir, n, log) {
+  const count = Math.max(1, Math.min(Math.trunc(Number(n)) || 2, 16))
+  const ts = Date.now()
+  fs.mkdirSync(shotDir, { recursive: true })
+  const shots = []
+  let prevHash = null
+  for (let k = 1; k <= count; k++) {
+    if (k > 1) {
+      await page.mouse.click(400, 300).catch(() => {})
+      await sleep(200)
+      await page.keyboard.press('PageDown').catch(() => {})
+      await sleep(800)
+    }
+    const p = path.join(shotDir, `pdf-${ts}-p${k}.png`)
+    try {
+      await page.screenshot({ path: p, fullPage: false })
+    } catch {
+      break // page gone (e.g. the human closed the window)
+    }
+    const hash = createHash('sha1').update(fs.readFileSync(p)).digest('hex')
+    if (prevHash !== null && hash === prevHash) {
+      fs.rmSync(p, { force: true })
+      break // viewer did not turn — the document has no more pages
+    }
+    prevHash = hash
+    shots.push(p)
+    log(`captured PDF viewer page ${k}/${count} -> ${p}`)
+  }
+  return shots
+}
+
+/**
+ * Build the outcome object for a URL that turned out to be a PDF document.
+ * `shots` are the paths of the captured page images (PDFs are read as images,
+ * not text-extracted); `dl` is the full-file download (lossless fallback for
+ * documents longer than the captured pages / exact text).
+ */
+function pdfOutcome({ url, finalUrl, dl, shots = [], verifiedViaHuman = false }) {
+  let message
+  if (dl.ok && shots.length > 0) {
+    message =
+      `This URL is a PDF document — to read its contents, read the page images ` +
+      `(as images, no text extraction needed): ${shots.join(', ')}. ` +
+      `The full file is also saved to: ${dl.path} (${(dl.size / 1024).toFixed(1)} KB) — ` +
+      'use it (e.g. with a PDF tool) for pages beyond the captured ones or exact text.'
+  } else if (dl.ok) {
+    message =
+      `This URL is a PDF document, not a web page — its text cannot be extracted here. ` +
+      `The file was downloaded to: ${dl.path} (${(dl.size / 1024).toFixed(1)} KB). ` +
+      'Read the file directly (e.g. with a PDF tool) to use its contents.'
+  } else if (shots.length > 0) {
+    message =
+      `This URL is a PDF document — read its pages as images: ${shots.join(', ')}. ` +
+      `Automatic download of the full file failed (${dl.reason}).`
+  } else {
+    message =
+      `This URL is a PDF document, not a web page — its text cannot be extracted here. ` +
+      `Automatic download failed (${dl.reason}); open the URL in a browser to view the document.`
+  }
+  return {
+    status: 'ok',
+    url,
+    finalUrl,
+    title: '',
+    pdf: true,
+    pdfPath: dl.ok ? dl.path : null,
+    pdfSize: dl.ok ? dl.size : null,
+    pdfShots: shots,
+    readable: false,
+    text: '',
+    truncated: false,
+    textLength: 0,
+    verifiedViaHuman,
+    screenshot: null,
+    message,
+  }
 }
 
 /**
@@ -148,9 +420,10 @@ async function extractFromPage(page) {
  */
 async function fetchUrlOnPage(page, url, o) {
   const { maxChars, includeHtml, wantShot, timeoutMs, shotDir, log } = o
+  let navResponse = null
   if (o.navigate !== false) {
     try {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
+      navResponse = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: timeoutMs })
     } catch (err) {
       return {
         status: 'error',
@@ -162,6 +435,55 @@ async function fetchUrlOnPage(page, url, o) {
   }
   const finalUrl = page.url() || url
   if (o.navigate !== false) await settlePage(page)
+
+  // --- PDF detection (before the wall / block heuristics): a PDF must never
+  // be mistaken for an anti-bot challenge. The main-document response
+  // content-type is authoritative; when it is unavailable (no response
+  // captured, or navigate:false after a human-verification round), the .pdf
+  // URL extension plus the empty PDFium-viewer document is the fallback.
+  const ct = (navResponse && navResponse.headers && navResponse.headers()['content-type']) || ''
+  if (/pdf/i.test(ct)) {
+    log(`URL is a PDF document (${finalUrl}) — downloading instead of extracting`)
+    const dl = await downloadPdf(page, finalUrl, o.downloadDir, log)
+    // Render the first pages to images from the downloaded file (pdftoppm,
+    // then pdf-to-img) — no text extraction, immune to weird encodings /
+    // scanned pages. Fallback: screenshots of the PDFium viewer.
+    let shots = dl.ok ? await pdfToPageImages(dl.path, o.pdfPages, o.shotDir, log) : []
+    if (shots.length === 0) {
+      shots = await viewerPageImages(page, o.shotDir, o.pdfPages, log)
+    }
+    return pdfOutcome({ url, finalUrl, dl, shots })
+  }
+  const bodyInfo = await page
+    .evaluate(() => {
+      const b = document.body
+      return { len: (b && b.innerText) || '', children: b ? b.children.length : -1 }
+    })
+    .catch(() => null)
+  const viewerShape = bodyInfo !== null && bodyInfo.len.length < 10 && bodyInfo.children === 0
+  // The URL-based fallback (no authoritative content-type) must not fire on a
+  // 4xx/5xx response: an empty 401/403 at a .pdf URL is an auth failure, not
+  // a PDF — that case keeps the wall → human-verify behavior.
+  const navStatus = navResponse ? navResponse.status() : null
+  if (
+    (navStatus === null || navStatus < 400) &&
+    !/text\/html/i.test(ct) &&
+    isPdfUrl(url) &&
+    (o.navigate === false || isPdfUrl(finalUrl)) &&
+    viewerShape
+  ) {
+    log(`URL is a PDF document (${finalUrl}) — downloading instead of extracting`)
+    const dl = await downloadPdf(page, finalUrl, o.downloadDir, log)
+    // Render the first pages to images from the downloaded file (pdftoppm,
+    // then pdf-to-img) — no text extraction, immune to weird encodings /
+    // scanned pages. Fallback: screenshots of the PDFium viewer.
+    let shots = dl.ok ? await pdfToPageImages(dl.path, o.pdfPages, o.shotDir, log) : []
+    if (shots.length === 0) {
+      shots = await viewerPageImages(page, o.shotDir, o.pdfPages, log)
+    }
+    return pdfOutcome({ url, finalUrl, dl, shots })
+  }
+
   const raw = await extractFromPage(page)
 
   // An off-host redirect to a short page (e.g. reddit.com bouncing to a
@@ -254,6 +576,7 @@ const WALL_HINTS = [
 
 function isWall(p) {
   if (p.status !== 'ok') return false
+  if (p.pdf) return false // a PDF is content, not a wall (its text is empty by design)
   const text = (p.text || '').trim()
   if (text.length >= 300) return false
   // A near-empty shell (< 20 chars) is still treated as a wall: the challenge
@@ -270,7 +593,7 @@ function isWall(p) {
  * same site usually pass headless.
  */
 async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, extra = {}) {
-  const { maxChars = 8000, wantShot = false } = extra
+  const { maxChars = 8000, wantShot = false, downloadDir, pdfPages = 2 } = extra
   let browser
   try {
     browser = await launchChrome({ headless: false, log }, env, chromeOpts)
@@ -285,6 +608,25 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
   }
   try {
     const page = (await browser.pages())[0] || (await browser.newPage())
+    // Track the main-document MIME type per URL as the browser navigates. Once
+    // the challenge passes and the target URL serves application/pdf, the page
+    // IS a PDF even though its DOM stays empty (the PDFium viewer renders an
+    // empty document) — the text-length probe below can never fire for it.
+    const docMime = new Map()
+    try {
+      const cdp = await page.createCDPSession()
+      await cdp.send('Network.enable')
+      const docReqUrl = new Map()
+      cdp.on('Network.requestWillBeSent', (e) => {
+        if (e.type === 'Document') docReqUrl.set(e.requestId, e.url)
+      })
+      cdp.on('Network.responseReceived', (e) => {
+        const rurl = docReqUrl.get(e.requestId)
+        if (rurl) docMime.set(rurl, (e.response && e.response.mimeType) || '')
+      })
+    } catch {
+      /* CDP unavailable — URL-extension detection still works as a fallback */
+    }
     try {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 })
     } catch {
@@ -310,16 +652,49 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
     log(`waiting up to ${verifyTimeoutMs}ms for the human to pass the challenge in the visible window`)
     const deadline = Date.now() + verifyTimeoutMs
     let solved = false
+    let solvedAsPdf = false
     while (Date.now() < deadline) {
       await sleep(2000)
       const st = await page
-        .evaluate(() => ((document.body && document.body.innerText) || '').length)
+        .evaluate(() => {
+          const b = document.body
+          return { len: (b && b.innerText) || '', children: b ? b.children.length : -1 }
+        })
         .catch(() => null)
       if (st === null) break // the human closed the window
-      if (st > 300) {
+      if (st.len.length > 300) {
         solved = true
         break
       }
+      // The challenge was passed and the target is a PDF: detect it directly
+      // and close the window at once instead of waiting out the full timeout
+      // (the PDF viewer's empty document would otherwise never look "solved").
+      const cur = page.url() || ''
+      const mime = docMime.get(cur) || ''
+      // Two signals, either is decisive on the same host:
+      //  - the main document's MIME is application/pdf (CDP network map);
+      //  - the current URL is a .pdf URL and the DOM has the empty PDFium
+      //    viewer shape (same heuristic the headless path uses — the CDP
+      //    map is not always populated, e.g. the navigation raced it).
+      const isPdfNow =
+        /^application\/pdf$/i.test(mime) ||
+        (isPdfUrl(cur) && st.len.length < 10 && st.children === 0 && !/text\/html/i.test(mime))
+      if (hostOf(cur) !== null && hostOf(cur) === hostOf(url) && isPdfNow) {
+        solvedAsPdf = true
+        break
+      }
+    }
+    if (solvedAsPdf) {
+      const finalUrl = page.url() || url
+      log('challenge passed — the page is a PDF document; downloading and closing the window')
+      const dl = await downloadPdf(page, finalUrl, downloadDir, log)
+      // Render page images from the downloaded file before closing the
+      // window (fallback: screenshots of the viewer).
+      let shots = dl.ok ? await pdfToPageImages(dl.path, pdfPages, shotDir, log) : []
+      if (shots.length === 0) {
+        shots = await viewerPageImages(page, shotDir, pdfPages, log)
+      }
+      return pdfOutcome({ url, finalUrl, dl, shots, verifiedViaHuman: true })
     }
     if (!solved) {
       const shot = await capture(page, shotDir, 'wall').catch(() => null)
@@ -357,6 +732,8 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
       wantShot,
       timeoutMs: 20000,
       shotDir,
+      downloadDir,
+      pdfPages,
       log,
     })
     if (outcome.status === 'ok') outcome.verifiedViaHuman = true
@@ -385,15 +762,20 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
  * @param {boolean} [opts.noSandbox=true]
  * @param {boolean} [opts.autoVerify=true]   if a site walls the page, open a visible window for the human
  * @param {number}  [opts.verifyTimeoutMs=150000] how long to wait for the human to pass the challenge
+ * @param {number}  [opts.pdfPages=2]        how many pages of a PDF document to capture as images (max 16)
  * @param {Function} [opts.log]
  * @returns {Promise<object>} outcome with status ok | error | blocked
- *   (`verifiedViaHuman: true` when a human passed the challenge)
+ *   (`verifiedViaHuman: true` when a human passed the challenge). When the URL
+ *   is a PDF document the outcome has `pdf: true` (never `blocked`), with
+ *   `pdfShots` (page images in `<profileDir>/screenshots`) and `pdfPath`
+ *   (file in `<profileDir>/downloads`) when those succeeded.
  */
 export async function fetchPage(url, opts = {}) {
   const env = process.env
   const log = opts.log || (() => {})
   const profileDir = opts.profileDir || defaultProfileDir()
   const shotDir = path.join(profileDir, 'screenshots')
+  const downloadDir = path.join(profileDir, 'downloads')
   const chromeOpts = { chromePath: opts.chromePath, profileDir, noSandbox: opts.noSandbox }
 
   let browser
@@ -416,6 +798,8 @@ export async function fetchPage(url, opts = {}) {
       wantShot: opts.screenshot === true,
       timeoutMs: opts.timeoutMs ?? 20000,
       shotDir,
+      downloadDir,
+      pdfPages: opts.pdfPages ?? 2,
       log,
     })
   } finally {
@@ -435,6 +819,8 @@ export async function fetchPage(url, opts = {}) {
       outcome = await humanVerify(url, env, chromeOpts, shotDir, log, opts.verifyTimeoutMs ?? 150000, {
         maxChars: opts.maxChars ?? 8000,
         wantShot: opts.screenshot === true,
+        downloadDir,
+        pdfPages: opts.pdfPages ?? 2,
       })
     } else {
       outcome = {
@@ -463,6 +849,7 @@ export async function fetchPage(url, opts = {}) {
  * @param {string}  [opts.hl='en']
  * @param {number}  [opts.verifyTimeoutMs]
  * @param {boolean} [opts.autoVerify=true]
+ * @param {number}  [opts.pdfPages=2]        how many pages of a PDF result page to capture as images (max 16)
  * @param {string}  [opts.chromePath]
  * @param {string}  [opts.profileDir]
  * @param {Function} [opts.log]
@@ -499,6 +886,7 @@ export async function searchAndFetch(query, opts = {}) {
   }
 
   const targets = search.results.slice(0, fetchTop)
+  const downloadDir = path.join(profileDir, 'downloads')
   const chromeOpts = { chromePath: opts.chromePath, profileDir, noSandbox: opts.noSandbox }
   let browser
   try {
@@ -535,6 +923,8 @@ export async function searchAndFetch(query, opts = {}) {
           wantShot: false,
           timeoutMs: 20000,
           shotDir,
+          downloadDir,
+          pdfPages: opts.pdfPages ?? 2,
           log,
         })
       } catch (err) {
@@ -557,6 +947,8 @@ export async function searchAndFetch(query, opts = {}) {
         sharedBrowser = null
         p = await humanVerify(t.link, env, chromeOpts, shotDir, log, verifyTimeoutMs, {
           maxChars: opts.maxChars ?? 8000,
+          downloadDir,
+          pdfPages: opts.pdfPages ?? 2,
         })
         try {
           sharedBrowser = await launchChrome({ headless: true }, env, chromeOpts)

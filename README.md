@@ -134,6 +134,29 @@ The plugin can also **render any URL and extract its readable main content**:
   same hand-to-human philosophy as the Google CAPTCHA flow. The trusted session
   cookie persists in the profile, so later pages of that site usually pass headless.
   Use `--no-verify` / `autoVerify: false` to just report `blocked` instead.
+- **Detects PDF documents.** Chrome renders PDFs in its built-in viewer, which is an
+  *empty* page — the exact shape a bot-wall check would mistake for a challenge. A PDF
+  is therefore detected explicitly (the main-document content-type, or the `.pdf` path
+  plus the empty viewer page) and **never treated as a wall**. The result offers two
+  ways to read the document:
+  - the **first pages as images** in `<profile>/screenshots/` (`...-pdf-<ts>-p1.png`,
+    `-p2.png`, …) — read them as images; this is the primary read path (no text
+    extraction, so weird encodings and even scanned pages just work). By default the
+    first **2** pages are captured; change it with `--pdf-pages <n>` (CLI: `fetch`
+    and search with `--fetch-top`) or the `pdfPages` MCP parameter (max 16; fewer
+    images are produced when the document is shorter).
+  Page images are rendered **from the downloaded file**, never from the browser's
+  PDF viewer: via the system `pdftoppm` (poppler-utils, `sudo apt install
+  poppler-utils`) when installed, otherwise via the optional `pdf-to-img` npm
+  package (installed automatically with this plugin; pure pdfjs, no system
+  packages needed), with screenshots of the viewer as a last resort.
+  - the **full file** downloaded to `<profile>/downloads/` (using the browser
+    session's cookies, so a verification the human just passed is honored) — the
+    lossless fallback for documents longer than the captured pages or exact text
+    (use a PDF tool on it).
+  When a human passes a challenge and the page turns out to be a PDF, both are
+  captured and the visible window closes **immediately** instead of waiting out the
+  verification timeout.
 
 ```sh
 dsh-google-search fetch "https://example.com/article" --max-chars 10000
@@ -253,7 +276,7 @@ After a DSH restart, the agent gets three native tools:
 | Tool | What it does |
 |---|---|
 | `mcp__chinchilla-websearch__search` | Google web search → links + snippets |
-| `mcp__chinchilla-websearch__fetch` | Render one URL → extracted readable content (title, byline, text, optional HTML/screenshot) |
+| `mcp__chinchilla-websearch__fetch` | Render one URL → extracted readable content (title, byline, text, optional HTML/screenshot); PDF URLs are detected and read as page images (first 2 by default, `pdfPages`) with the full file downloaded |
 | `mcp__chinchilla-websearch__search_and_fetch` | Search → render the top N pages → per-page extracted content in one call |
 | `mcp__chinchilla-websearch__login` | Open a visible window so the human signs in with a Google account → session kept in the profile |
 | `mcp__chinchilla-websearch__account` | Check (headless) whether the profile holds a signed-in Google account |
@@ -293,6 +316,7 @@ and it just works).
 | `autoVerify` | `true` | if `false`, never open a visible window — just report |
 | `gl` / `hl` | `us` / `en` | region / language |
 | `maxChars` | 8000 | max extracted characters per fetched page (fetch / search_and_fetch) |
+| `pdfPages` / `--pdf-pages` | 2 | how many pages of a fetched PDF to capture as images (max 16; stops at the end of the document) |
 | `fetchTop` | 3 | how many result pages to render in `search_and_fetch` (max 5) |
 | `includeHtml` / `screenshot` | `false` | fetch options: also return extracted HTML / a page screenshot |
 | `timeoutMs` | 20000 | navigation timeout per fetched page |
@@ -406,6 +430,7 @@ Note it overrides everything below it in the chain, including the bundled browse
 | `fetch` opens a window with a slider / "confirm you are human" | That's the human-verification step working as intended: pass the challenge in the window, then it retries and keeps the session. `--no-verify` skips the window and just reports `blocked`. |
 | `fetch` returns `blocked` (no window) | The site walls off headless browsers and `autoVerify` is off (or no display). Try a different source for the same topic, or run with verification enabled. |
 | `fetch` returns empty text | The page is JS-heavy and hadn't finished rendering; retry (it settles up to ~7 s), or bump `--timeout`. |
+| `fetch` on a PDF URL reports image + file paths instead of text | That's the PDF detection working: read the page images (`<profile>/screenshots/`, default 2 pages — change with `--pdf-pages <n>` / `pdfPages`) to see the content, or use a PDF tool on the downloaded file (`<profile>/downloads/`) for the rest of the document. |
 
 ## Revert / clean up
 

@@ -108,6 +108,21 @@ Behavior notes:
 - Exit 3 can mean the page was **blocked by an anti-bot wall** (the output says
   `FETCH BLOCKED`) or that the search yielded no results. When blocked (and no window
   opened), fetch a different source for the same topic instead of retrying.
+- **PDF documents are detected, never mistaken for a wall.** If the URL (or the page
+  behind a verification challenge) is a PDF, the output says `Type: PDF document` with
+  two paths: **page images** (default: the first 2 pages,
+  `<profile>/screenshots/...-pdf-<ts>-p1.png`, `-p2.png`, …; change the count with
+  `--pdf-pages <n>` or the MCP `pdfPages` parameter, max 16 — fewer images if the
+  document is shorter; the images are rendered from the downloaded file via
+  `pdftoppm`/poppler-utils or the optional `pdf-to-img` npm package) and the
+  **full file** (`<profile>/downloads/`, downloaded with the browser session's cookies,
+  so a verification the human just passed is honored). To read the document, **read the
+  images as images** (e.g. with `read_image`) — no text extraction, so weird encodings
+  and scanned pages just work. For pages beyond the captured ones or exact text, use a
+  PDF tool on the downloaded file. Don't re-fetch the URL hoping for text. If the human passes a
+  challenge and the page turns out to be a PDF, both are captured and the window closes
+  by itself immediately (there is nothing more for them to do — don't wait for a
+  timeout).
 - Pages render sequentially (~1–3 s each). Don't run two commands at once — one
   Chrome process per profile.
 

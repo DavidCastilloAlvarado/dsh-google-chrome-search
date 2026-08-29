@@ -203,6 +203,19 @@ server.registerTool(
 
 function formatPage(p) {
   const lines = []
+  if (p.pdf) {
+    lines.push('(PDF document — its contents are not text-extracted)')
+    lines.push(`PDF URL: ${p.finalUrl || p.url}`)
+    for (const [i, s] of (p.pdfShots || []).entries()) {
+      lines.push(`Page ${i + 1} image (read it as an image): ${s}`)
+    }
+    if (p.pdfPath) {
+      lines.push(`Full file (for pages beyond the captured ones / exact text): ${p.pdfPath}${p.pdfSize ? ` (${(p.pdfSize / 1024).toFixed(1)} KB)` : ''}`)
+    }
+    if (p.verifiedViaHuman) lines.push('(the page was behind a verification challenge — passed via the visible window)')
+    if (p.message) lines.push(p.message)
+    return lines.join('\n')
+  }
   lines.push(`# ${p.title || '(untitled)'}`)
   if (p.byline) lines.push(`by ${p.byline}`)
   if (p.siteName) lines.push(`site: ${p.siteName}`)
@@ -224,6 +237,13 @@ server.registerTool(
       'URL after redirects. Use this to read any webpage in depth: docs, articles, pages found ' +
       'via search or anywhere else. If a site serves a human-verification challenge (anti-bot ' +
       'slider), a visible Chrome window is opened for the human to solve it (autoVerify). ' +
+      'If the URL is a PDF document, it is detected (NOT treated as a bot-wall): the ' +
+      'first N pages are captured as images (default 2, set with pdfPages — read them ' +
+      'as images, PDFs are not text-extracted) and the full file is downloaded to the ' +
+      'profile\'s downloads folder; the image blocks are attached and both paths are ' +
+      'returned. Use the file (e.g. with a PDF tool) for pages beyond the captured ' +
+      'ones or exact text. If the human passes a challenge and the page turns out to ' +
+      'be a PDF, the window closes immediately. ' +
       'The profile may hold a signed-in Google account scoped to search: do NOT use this tool ' +
       'to open or extract the user\'s private pages (Gmail, Drive, personal pages) or any ' +
       'personal data — public web content in service of a search task only.',
@@ -257,6 +277,16 @@ server.registerTool(
         .max(600000)
         .default(150000)
         .describe('How long (ms) to wait for the human to pass a page challenge (default 150000).'),
+      pdfPages: z
+        .number()
+        .int()
+        .min(1)
+        .max(16)
+        .default(2)
+        .describe(
+          'When the URL is a PDF, how many pages to capture as images (default 2). ' +
+            'Only relevant for PDF documents.',
+        ),
     },
   },
   async (args) =>
@@ -276,6 +306,7 @@ server.registerTool(
           screenshot: args.screenshot,
           autoVerify: args.autoVerify,
           verifyTimeoutMs: args.verifyTimeoutMs,
+          pdfPages: args.pdfPages,
           log,
         })
       } catch (err) {
@@ -289,6 +320,10 @@ server.registerTool(
         const text =
           formatPage(outcome) + (outcome.html ? `\n\n--- HTML (capped) ---\n${outcome.html}` : '')
         const content = [{ type: 'text', text }]
+        for (const s of outcome.pdfShots || []) {
+          const pageImg = readScreenshotAsImageBlock(s)
+          if (pageImg) content.push(pageImg)
+        }
         const img = readScreenshotAsImageBlock(outcome.screenshot)
         if (img) content.push(img)
         return { content }
@@ -346,9 +381,13 @@ server.registerTool(
       'Run a Google web search, then render the top N result pages with the local Chrome and ' +
       'extract their readable main content. Returns each page as article text (capped per page). ' +
       'Use this when the search snippets are not enough and you need the actual content of the ' +
-      'top pages. Slower than plain search (~1-3 s per page). If the profile is signed in with ' +
-      'a Google account, the session is scoped to this plugin\'s web search only — never use ' +
-      'it for other Google services or personal data.',
+      'top pages. Slower than plain search (~1-3 s per page). Result pages that are PDF ' +
+      'documents are detected as such: their first pages are captured as images ' +
+      '(pdfPages, default 2) and the full file is downloaded, and the paths are ' +
+      'reported instead of text. If the profile is signed in with a Google account, the ' +
+      'session is scoped to ' +
+      'this plugin\'s web search only — never use it for other Google services or personal ' +
+      'data.',
     inputSchema: {
       query: z.string().min(1).describe('The search query.'),
       maxResults: z
@@ -388,6 +427,16 @@ server.registerTool(
           'If Google or a result page serves a human-verification challenge, open a visible ' +
           'Chrome window and wait for the human to solve it (default true).',
         ),
+      pdfPages: z
+        .number()
+        .int()
+        .min(1)
+        .max(16)
+        .default(2)
+        .describe(
+          'When a result page is a PDF, how many pages to capture as images (default 2). ' +
+            'Only relevant for PDF result pages.',
+        ),
       aiOverview: z
         .boolean()
         .default(true)
@@ -416,6 +465,7 @@ server.registerTool(
           hl: args.hl,
           verifyTimeoutMs: args.verifyTimeoutMs,
           autoVerify: args.autoVerify,
+          pdfPages: args.pdfPages,
           aiOverview: args.aiOverview,
           log,
         })
