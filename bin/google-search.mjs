@@ -5,6 +5,8 @@
  * Usage:
  *   dsh-google-search "<query>" [options]
  *   dsh-google-search fetch "<url>" [options]
+ *   dsh-google-search login [--wait <ms>] [--start-url <url>]
+ *   dsh-google-search account
  *   dsh-google-search install-browser [--force]
  *   dsh-google-search mcp
  *   node bin/google-search.mjs "<query>" [options]
@@ -26,9 +28,22 @@
  *   --headless/--headed    force the first attempt to be headless (default) or visible
  *   --fetch-top <n>        after the search, render and extract the top N result pages (0 = off, max 5)
  *   --fetch-max-chars <n>  max characters of extracted text per page (default 8000)
+ *   --no-ai-overview       skip capturing Google's AI Overview (answer + cited references)
  *   --json                 print the raw JSON outcome
  *   --chrome <path>        Chrome executable path
  *   --profile <dir>        persistent Chrome profile dir
+ *
+ * login options:
+ *   --wait <ms>            how long to wait for the human to sign in (default 300000)
+ *   --start-url <url>      page to open (default: Google's account page)
+ *   --chrome <path>        Chrome executable path
+ *   --profile <dir>        persistent Chrome profile dir
+ *   --json                 print the raw JSON outcome
+ *
+ * account options:
+ *   --chrome <path>        Chrome executable path
+ *   --profile <dir>        persistent Chrome profile dir
+ *   --json                 print the raw JSON outcome
  *
  * Fetch options:
  *   --max-chars <n>        max characters of extracted text (default 8000)
@@ -46,6 +61,7 @@
 import { googleSearch, defaultProfileDir } from '../src/search.mjs'
 import { fetchPage, searchAndFetch } from '../src/fetch.mjs'
 import { installBrowser } from '../src/browser.mjs'
+import { googleLogin, checkGoogleAccount } from '../src/login.mjs'
 
 function parseArgs(argv) {
   const opts = {}
@@ -67,6 +83,12 @@ function parseArgs(argv) {
       case '--verify-timeout':
         opts.verifyTimeoutMs = parseInt(next(), 10)
         break
+      case '--wait':
+        opts.waitMs = parseInt(next(), 10)
+        break
+      case '--start-url':
+        opts.startUrl = next()
+        break
       case '--no-verify':
         opts.autoVerify = false
         break
@@ -81,6 +103,9 @@ function parseArgs(argv) {
         break
       case '--fetch-max-chars':
         opts.fetchMaxChars = parseInt(next(), 10)
+        break
+      case '--no-ai-overview':
+        opts.aiOverview = false
         break
       case '--max-chars':
         opts.maxChars = parseInt(next(), 10)
@@ -122,14 +147,33 @@ function parseArgs(argv) {
   return opts
 }
 
+function printAiOverview(ai) {
+  if (!ai || !ai.present) return
+  console.log('')
+  console.log('── AI Overview (Google\'s AI-generated answer) ──────────────────')
+  if (ai.text) console.log(ai.text)
+  if (ai.references && ai.references.length > 0) {
+    console.log('')
+    console.log('References cited by Google:')
+    ai.references.forEach((r, i) => {
+      console.log(` ${i + 1}. ${r.title || r.url}`)
+      console.log(`    ${r.url}`)
+    })
+  }
+  console.log('──────────────────────────────────────────────────────────────')
+}
+
 function printReadable(o) {
   if (o.status === 'ok') {
     console.log(`Google search results for: ${o.query}`)
     if (o.url) console.log(`(source: ${o.url})`)
     console.log('')
+    printAiOverview(o.aiOverview)
     if (!o.results || o.results.length === 0) {
       console.log('(no organic results returned)')
     } else {
+      console.log('')
+      console.log('Organic results:')
       o.results.forEach((r, i) => {
         console.log(`${i + 1}. ${r.title}`)
         console.log(`   ${r.link}`)
@@ -168,10 +212,26 @@ function printFetch(p) {
   if (p.screenshot) console.log(`\nScreenshot: ${p.screenshot}`)
 }
 
+function printLogin(o) {
+  const ok = o.status === 'logged_in' || o.status === 'already_signed_in'
+  console.log(`LOGIN ${o.status.toUpperCase()}${o.account ? ` (${o.account})` : ''}`)
+  console.log(o.message || '')
+  console.log(`Profile: ${o.profileDir}`)
+  if (ok) console.log('\nDone — later searches now run with this Google account.')
+}
+
+function printAccount(o) {
+  console.log(`ACCOUNT ${o.status === 'logged_in' ? 'LOGGED_IN' : 'NOT_LOGGED_IN'}`)
+  console.log(o.message || '')
+  if (o.account) console.log(`Account: ${o.account}`)
+  console.log(`Profile: ${o.profileDir}`)
+}
+
 function printSearchAndFetch(o) {
   console.log(`Google search results for: ${o.query}`)
   if (o.searchUrl) console.log(`(source: ${o.searchUrl})`)
   if (o.verifiedViaHuman) console.log('(completed via human verification)')
+  printAiOverview(o.aiOverview)
   if (!o.pages) return
   console.log(`\nFound ${o.resultCount} result(s); fetched ${o.pages.length} page(s)\n`)
   o.pages.forEach((p, i) => {
@@ -184,9 +244,11 @@ function printSearchAndFetch(o) {
 async function main() {
   const argv = process.argv.slice(2)
   const isFetch = argv[0] === 'fetch'
+  const isLogin = argv[0] === 'login'
+  const isAccount = argv[0] === 'account'
   const isInstallBrowser = argv[0] === 'install-browser'
   const isMcp = argv[0] === 'mcp'
-  const sub = isFetch || isInstallBrowser || isMcp
+  const sub = isFetch || isLogin || isAccount || isInstallBrowser || isMcp
   const opts = parseArgs(sub ? argv.slice(1) : argv)
 
   const text =
@@ -195,6 +257,8 @@ async function main() {
     'Usage:\n' +
     '  dsh-google-search "<query>" [options]\n' +
     '  dsh-google-search fetch "<url>" [options]\n' +
+    '  dsh-google-search login [--wait <ms>] [--start-url <url>]   sign in with a Google account (visible window)\n' +
+    '  dsh-google-search account                                    check the profile for a signed-in Google account\n' +
     '  dsh-google-search install-browser [--force]   download Chrome for Testing (self-contained setup)\n' +
     '  dsh-google-search mcp                         run the MCP stdio server\n' +
     'See header comment for options.\n'
@@ -241,6 +305,36 @@ async function main() {
     }
   }
 
+  if (isLogin || isAccount) {
+    try {
+      if (isLogin) {
+        const o = await googleLogin({
+          waitMs: opts.waitMs,
+          startUrl: opts.startUrl,
+          chromePath: opts.chromePath,
+          profileDir: opts.profileDir,
+          log,
+        })
+        if (opts.json) console.log(JSON.stringify(o, null, 2))
+        else printLogin(o)
+        const ok = o.status === 'logged_in' || o.status === 'already_signed_in'
+        process.exit(ok ? 0 : 3)
+      }
+      const o = await checkGoogleAccount({
+        chromePath: opts.chromePath,
+        profileDir: opts.profileDir,
+        log,
+      })
+      if (opts.json) console.log(JSON.stringify(o, null, 2))
+      else printAccount(o)
+      process.exit(o.status === 'logged_in' ? 0 : 3)
+    } catch (err) {
+      process.stderr.write(`Error: ${err && err.message ? err.message : String(err)}\n`)
+      process.exit(1)
+    }
+    return
+  }
+
   let outcome
   try {
     if (isFetch) {
@@ -264,6 +358,7 @@ async function main() {
         hl: opts.hl,
         verifyTimeoutMs: opts.verifyTimeoutMs,
         autoVerify: opts.autoVerify,
+        aiOverview: opts.aiOverview,
         chromePath: opts.chromePath,
         profileDir: opts.profileDir,
         log,
@@ -275,6 +370,7 @@ async function main() {
         hl: opts.hl,
         verifyTimeoutMs: opts.verifyTimeoutMs,
         autoVerify: opts.autoVerify,
+        aiOverview: opts.aiOverview,
         headless: opts.headless,
         chromePath: opts.chromePath,
         profileDir: opts.profileDir,

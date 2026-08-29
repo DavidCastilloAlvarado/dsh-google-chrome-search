@@ -55,14 +55,14 @@ await client.connect(transport)
 const tools = await client.listTools()
 const names = tools.tools.map((t) => t.name)
 console.log('TOOLS:', JSON.stringify(names))
-for (const expected of ['search', 'fetch', 'search_and_fetch']) {
+for (const expected of ['search', 'fetch', 'search_and_fetch', 'login', 'account']) {
   if (!names.includes(expected)) {
     console.error(`FAIL: \`${expected}\` tool not listed by the MCP server`)
     await client.close()
     process.exit(1)
   }
 }
-console.log('OK: MCP server lists the search, fetch, and search_and_fetch tools')
+console.log('OK: MCP server lists the search, fetch, search_and_fetch, login, and account tools')
 
 if (!chrome) {
   console.log('SKIP: no Chrome/Chromium found — skipping the live search call (CI mode)')
@@ -76,9 +76,23 @@ const res = await client.callTool({
   arguments: { query: 'nodejs streams', maxResults: 3, autoVerify: false },
 })
 console.log('IS_ERROR:', res.isError)
+let textOut = ''
 for (const c of res.content) {
-  if (c.type === 'text') console.log('TEXT:\n' + c.text)
+  if (c.type === 'text') {
+    textOut += c.text
+    console.log('TEXT:\n' + c.text)
+  }
   if (c.type === 'image') console.log('IMAGE: (screenshot, ' + c.data.length + ' b64 chars)')
 }
+// "Organic results" is always present in a successful search; "AI Overview" is
+// intermittent (Google only shows it for some queries / A-B variants), so it is
+// reported but not required.
+if (!textOut.includes('Organic results')) {
+  console.error('FAIL: search output is missing the "Organic results" section')
+  await client.close()
+  process.exit(1)
+}
+console.log('OK: search output contains the "Organic results" section')
+console.log(textOut.includes('AI Overview') ? 'INFO: "AI Overview" section was present' : 'INFO: no "AI Overview" for this query (expected for some queries)')
 await client.close()
 process.exit(0)

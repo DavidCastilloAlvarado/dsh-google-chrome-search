@@ -378,6 +378,218 @@ async function tryRead(page) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// AI Overview (Google's AI-generated answer + cited references)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract Google's AI Overview (AI-generated answer) and the references it
+ * cites, from an already-loaded SERP page.
+ *
+ * Returns `null` when the page has no AI Overview box. Otherwise:
+ *   { present: true, text: '<answer>', references: [{ title, url }, …] }
+ *
+ * Best-effort by design: Google changes this UI frequently, so detection is
+ * text-based (header marker) and references are any non-Google-internal link
+ * inside the box. Never throws.
+ */
+export async function extractAiOverview(page, log = () => {}) {
+  try {
+    // Phase 1: detect the box (poll briefly — it can render a beat after the
+    // results); if the answer is truncated ("Show more" / "Mostrar más"),
+    // click it so the full text renders.
+    let phase1 = null
+    const detectDeadline = Date.now() + 3000
+    for (;;) {
+      phase1 = await page.evaluate(() => {
+        const norm = (s) => (s || '').replace(/\s+/g, ' ').trim()
+        const cands = [...document.querySelectorAll('div')].filter((d) =>
+          /^(ai overview|resumen con ia|resumen generado con ia|respuesta con ia|responder con ia|ai-generated)/i.test(
+            norm(d.innerText || ''),
+          ),
+        )
+        cands.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)
+        let box = cands[0]
+        if (!box) return { found: false }
+        for (let i = 0; i < 10 && box.parentElement; i++) {
+          const p = box.parentElement
+          if ((p.innerText || '').length >= (box.innerText || '').length + 150) box = p
+          else break
+        }
+        let clickedMore = false
+        for (const b of box.querySelectorAll('button,[role="button"],a[role="button"],div[role="button"]')) {
+          const label = (norm(b.textContent) + ' ' + (b.getAttribute('aria-label') || '')).toLowerCase()
+          if (/(^|\s)(show more|see more|mostrar m[áa]s|ver m[áa]s|mostrar todo|show all)(\s|$)/.test(label)) {
+            try {
+              b.click()
+              clickedMore = true
+            } catch {
+              /* ignore */
+            }
+            break
+          }
+        }
+        return { found: true, clickedMore }
+      }).catch(() => ({ found: false }))
+      if (phase1.found || Date.now() >= detectDeadline) break
+      await sleep(500)
+    }
+    if (!phase1 || !phase1.found) return null
+    if (phase1.clickedMore) {
+      await sleep(1500) // let the expanded answer render
+    }
+
+    // Phase 2: read the answer text and the cited references.
+    // NOTE: no function arguments to evaluate() — this puppeteer build does not
+    // serialize them, so the internal-host check is inlined here.
+    const data = await page.evaluate(() => {
+      const isGoogleInternalHost = (host) =>
+        /(^|\.)(google|gstatic|ggpht|googlevideo)\.[a-z.]+$/i.test(host) ||
+        host === 'accounts.google.com' ||
+        host.endsWith('.googleapis.com')
+      const norm = (s) => (s || '').replace(/\s+/g, ' ').trim()
+      const box = (() => {
+        const cands = [...document.querySelectorAll('div')].filter((d) =>
+          /^(ai overview|resumen con ia|resumen generado con ia|respuesta con ia|responder con ia|ai-generated)/i.test(
+            norm(d.innerText || ''),
+          ),
+        )
+        cands.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)
+        let box = cands[0]
+        if (!box) return null
+        for (let i = 0; i < 10 && box.parentElement; i++) {
+          const p = box.parentElement
+          if ((p.innerText || '').length >= (box.innerText || '').length + 150) box = p
+          else break
+        }
+        return box
+      })()
+      if (!box) return null
+
+      const full = box.innerText || ''
+
+      // Variant where Google has no answer for the query — nothing to capture.
+      if (/ai overview is not available|can'?t generate an? ?ai overview|no se puede generar un? ?resumen con ia|resumen con ia no disponible/i.test(full.slice(0, 400))) {
+        return null
+      }
+
+      // --- Answer text: everything after the header, up to where the sources
+      // section ("cited sites") begins. Google A/B-tests this UI, so two
+      // strategies are used: an explicit "N sites" / "Mostrar todo" marker line,
+      // or (fallback) the end of the answer just before the sources subtree. ---
+      const lines = full.split('\n').map((l) => l.trim())
+      let start = 0
+      if (start < lines.length && /^(ai overview|resumen con ia|resumen generado con ia|respuesta con ia|responder con ia|ai-generated)/i.test(lines[start])) start += 1
+
+      let endLine = -1
+      for (let i = start; i < lines.length; i++) {
+        if (/^\d+\s*(sites?|sitios|fuentes|websites)$/i.test(lines[i]) || /^(show all|mostrar todo|ver todo)$/i.test(lines[i])) {
+          endLine = i
+          break
+        }
+      }
+
+      let cutChar = -1
+      if (endLine < 0) {
+        const isInternal = (h) =>
+          /(^|\.)(google|gstatic|ggpht|googlevideo)\.[a-z.]+$/i.test(h) ||
+          h === 'accounts.google.com' ||
+          h.endsWith('.googleapis.com')
+        const label = [...box.querySelectorAll('span,div,button,a')].find((e) => {
+          const t = norm(e.textContent)
+          return /^\d+\s*(sites?|sitios|fuentes|websites)$/i.test(t) && t.length < 25
+        })
+        if (label) {
+          let section = label
+          for (let i = 0; i < 8 && section.parentElement && section.parentElement !== box; i++) {
+            section = section.parentElement
+            let ext = 0
+            for (const a of section.querySelectorAll('a[href]')) {
+              const raw = a.getAttribute('href') || ''
+              if (!/^https?:/i.test(raw)) continue
+              try {
+                if (!isInternal(new URL(raw, location.href).hostname)) ext++
+              } catch {
+                /* ignore */
+              }
+            }
+            if (ext >= 3) break
+          }
+          const r = document.createRange()
+          r.selectNodeContents(box)
+          r.setEnd(section, 0)
+          let win = r.toString().replace(/\s+/g, ' ').trim().slice(-60)
+          win = win.replace(/([a-z])([A-Z])/g, '$1 $2') // fix textContent join boundaries
+          for (let len = Math.min(60, win.length); len >= 20; len--) {
+            const key = win.slice(-len)
+            const idx = full.lastIndexOf(key) // last occurrence = true end of answer
+            if (idx >= 0) {
+              cutChar = idx + len
+              break
+            }
+          }
+        }
+      }
+
+      let end = lines.length
+      if (endLine >= 0) {
+        end = endLine
+      } else if (cutChar > 0) {
+        const candidate = full.slice(0, cutChar).split('\n').length
+        if (candidate > start + 3) end = candidate // keep at least a few answer lines
+      }
+      const text = lines.slice(start, end).filter(Boolean).join('\n')
+
+      // --- References: every non-Google-internal link in the box, deduped,
+      // keeping the best (longest) title seen for each URL. ---
+      const bestTitle = new Map() // url -> title
+      const order = []
+      for (const a of box.querySelectorAll('a[href]')) {
+        const raw = a.getAttribute('href') || ''
+        if (!/^https?:/i.test(raw)) continue
+        let u
+        try {
+          u = new URL(raw, location.href)
+        } catch {
+          continue
+        }
+        if (isGoogleInternalHost(u.hostname)) continue
+        if (/(^|\.)google\.[a-z.]+\/(search|url|goto)$/i.test(u.hostname + u.pathname)) continue
+        const title = (a.innerText || '').replace(/\s+/g, ' ').trim()
+        const key = u.href
+        if (!bestTitle.has(key)) {
+          bestTitle.set(key, '')
+          order.push(key)
+        }
+        if (title && title.length > bestTitle.get(key).length) bestTitle.set(key, title)
+      }
+      const references = order.map((url) => ({
+        title: (bestTitle.get(url) || '').slice(0, 120) || (() => {
+          try {
+            return new URL(url).hostname
+          } catch {
+            return url
+          }
+        })(),
+        url,
+      }))
+
+      return { text, references }
+    }).catch(() => null)
+
+    if (!data || (!data.text && data.references.length === 0)) return null
+    if (data.text) log(`Captured AI Overview answer (${data.text.length} chars, ${data.references.length} references)`)
+    return {
+      present: true,
+      text: data.text || '',
+      references: data.references || [],
+    }
+  } catch (err) {
+    log(`AI Overview extraction failed: ${err && err.message ? err.message : String(err)}`)
+    return null
+  }
+}
+
 /**
  * Run a Google search using the local Chrome.
  *
@@ -510,6 +722,11 @@ export async function googleSearch(query, opts = {}) {
     const results = (info.results || []).slice(0, maxResults)
     // Turn Google's redirect wrappers into real destination URLs.
     await resolveLinks(results, resolveChromePath(env, chromeOpts), log)
+    // Capture Google's AI-generated answer + cited references, when present.
+    let aiOverview = null
+    if (opts.aiOverview !== false) {
+      aiOverview = await extractAiOverview(page, log)
+    }
     const outcome = {
       status: 'ok',
       query,
@@ -517,6 +734,7 @@ export async function googleSearch(query, opts = {}) {
       resultCount: results.length,
       results,
       verifiedViaHuman: usedVisibleWindow,
+      aiOverview,
     }
     return outcome
   } finally {

@@ -21,10 +21,11 @@ tries to solve a CAPTCHA itself.
 
 | Piece | Path | Purpose |
 |---|---|---|
-| Core engine | `src/search.mjs` | Chrome/CDP Google search + CAPTCHA verification + result extraction |
+| Core engine | `src/search.mjs` | Chrome/CDP Google search + CAPTCHA verification + result extraction + Google **AI Overview** capture (AI-generated answer + cited references) |
 | Page engine | `src/fetch.mjs` | Render any URL + extract readable content (Mozilla Readability) + `search_and_fetch` |
-| MCP server | `src/server.mjs` | Exposes `search`, `fetch`, `search_and_fetch` over stdio → native `mcp__chinchilla-websearch__*` in DSH |
-| CLI | `bin/google-search.mjs` | `dsh-google-search "<query>"`, `fetch "<url>"`, `install-browser`, `mcp` — direct use / npx |
+| Login engine | `src/login.mjs` | Sign in with a Google account (visible window) + session check, kept in the persistent profile |
+| MCP server | `src/server.mjs` | Exposes `search`, `fetch`, `search_and_fetch`, `login`, `account` over stdio → native `mcp__chinchilla-websearch__*` in DSH |
+| CLI | `bin/google-search.mjs` | `dsh-google-search "<query>"`, `fetch "<url>"`, `login`, `account`, `install-browser`, `mcp` — direct use / npx |
 | Skill | `skill/SKILL.md` | Teaches the agent how to use it + the human-verification workflow |
 
 ## Quick start (no install — npx)
@@ -107,6 +108,10 @@ node bin/google-search.mjs "nodejs streams" --max 8 --fetch-top 3 --fetch-max-ch
 
 # Fetch one URL directly (render + extract readable content):
 node bin/google-search.mjs fetch "https://nodejs.org/api/stream.html" --max-chars 8000
+
+# Sign in with a Google account (visible window) + check the session:
+node bin/google-search.mjs login
+node bin/google-search.mjs account --json
 ```
 
 Exit codes: `0` = success (results / fetched content), `2` = verification required
@@ -145,6 +150,76 @@ Two ways to combine search and reading:
 Pages are rendered **sequentially** (one browser, one page at a time) — expect
 ~1–3 s per page.
 
+## AI Overview (Google's AI-generated answer)
+
+Every `search` also captures Google's **AI Overview** — the AI-generated answer
+that Google shows at the top of the results — **together with the references it
+cites**. This is available on the `search` and `search_and_fetch` tools (MCP) and
+on `dsh-google-search "<query>"` (CLI).
+
+What you get, in addition to the organic results:
+
+- **The AI answer text** — Google's generated response, cleaned of the UI chrome
+  (header, "N sites" label, source-card block) so it reads as the answer alone.
+- **The cited references** — the list of sites Google used to build the answer,
+  each with a title and a full URL, deduplicated.
+
+```
+── AI Overview (Google's AI-generated answer) ──────────────────
+Quantum entanglement is a physical phenomenon where two or more particles
+become deeply interconnected …
+
+References cited by Google:
+ 1. scienceexchange.caltech.edu
+    https://scienceexchange.caltech.edu/topics/quantum-science-explained/entanglement
+ 2. science.nasa.gov
+    https://science.nasa.gov/what-is-the-spooky-science-of-quantum-entanglement/
+ …
+```
+
+Notes:
+
+- **It is intermittent.** Google only shows an AI Overview for some queries, and
+  it is A/B tested per request. When there is none, the field is `null` and
+  nothing is printed — the search still returns its organic results normally.
+- **Best-effort, never fails the search.** The AI Overview markup is unstable
+  (Google changes classes and layout frequently). Extraction is defensive: if it
+  cannot be parsed, the search outcome is unchanged.
+- **Structured access.** In `--json` / MCP the outcome carries an `aiOverview`
+  object: `{ present: true, text, references: [{ title, url }] }` or `null`.
+- Disabling: pass `aiOverview: false` (MCP) or `--no-ai-overview` (CLI) to skip
+  the capture entirely.
+
+## Sign in with a Google account (optional — more trusted, longer-lasting session)
+
+The plugin works anonymously out of the box. But Google treats **signed-in accounts** very
+differently from anonymous automated traffic: a real, logged-in account is trusted far
+more, so **CAPTCHAs become much rarer** and the session **lasts a long time** (until Google
+expires it or you reset the profile).
+
+```sh
+# Open a visible Chrome window pointed at Google's account page. The human signs in with
+# their own Google account; the session cookies are then stored in the persistent profile.
+node bin/google-search.mjs login                 # or: npx dsh-google-chrome-search login
+node bin/google-search.mjs login --wait 600000   # wait up to 10 min for the human
+node bin/google-search.mjs account               # check (headless) whether the profile is signed in
+```
+
+As MCP tools: `mcp__chinchilla-websearch__login` and `mcp__chinchilla-websearch__account`.
+
+**Security model:**
+
+- The **agent never sees or handles your credentials** — you type them directly into a real
+  Chrome window on your own machine.
+- Only **session cookies** end up on disk, and only in the plugin's **own isolated profile**
+  (`~/.dsh-chrome-google`), never in your personal browser.
+- Treat the profile like a cached password: anyone with access to that folder on that machine
+  can use the session while it is valid. Deleting the profile (or signing out from Google)
+  revokes it.
+
+Exit codes for `login`: `0` = signed in (or already signed in), `3` = timed out / window
+closed before sign-in, `1` = error.
+
 ## Use it as a native DSH tool (MCP)
 
 Register the MCP server with DSH's `@deepseek-ai/dsh-mcp-client` in your profile config.
@@ -180,6 +255,8 @@ After a DSH restart, the agent gets three native tools:
 | `mcp__chinchilla-websearch__search` | Google web search → links + snippets |
 | `mcp__chinchilla-websearch__fetch` | Render one URL → extracted readable content (title, byline, text, optional HTML/screenshot) |
 | `mcp__chinchilla-websearch__search_and_fetch` | Search → render the top N pages → per-page extracted content in one call |
+| `mcp__chinchilla-websearch__login` | Open a visible window so the human signs in with a Google account → session kept in the profile |
+| `mcp__chinchilla-websearch__account` | Check (headless) whether the profile holds a signed-in Google account |
 
 Notes:
 
@@ -219,6 +296,7 @@ and it just works).
 | `fetchTop` | 3 | how many result pages to render in `search_and_fetch` (max 5) |
 | `includeHtml` / `screenshot` | `false` | fetch options: also return extracted HTML / a page screenshot |
 | `timeoutMs` | 20000 | navigation timeout per fetched page |
+| `waitMs` | 300000 | how long `login` waits for the human to complete the Google sign-in |
 
 ## The human-verification flow, step by step
 
@@ -236,7 +314,7 @@ and it just works).
 
 Releases are manual and tokenless — the same methodology as
 `chinchilla-llm-router`. From the GitHub **Actions** tab, run the `release`
-workflow with an input like `v0.2.0`:
+workflow with an input like `v1.0.0`:
 
 1. **Before dispatching**: bump `version` in `package.json` to the release
    version (CI never rewrites versions) and commit.

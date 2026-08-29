@@ -1,9 +1,12 @@
 /**
  * dsh-google-chrome-search — MCP stdio server.
  *
- * Exposes three tools: `search` (Google web search by driving the local Chrome),
- * `fetch` (render a URL + extract readable content), and `search_and_fetch`
- * (search + read the top N pages). Register it with DSH's
+ * Exposes five tools: `search` (Google web search by driving the local Chrome),
+ * `fetch` (render a URL + extract readable content), `search_and_fetch`
+ * (search + read the top N pages), `login` (sign in with a Google account in a
+ * visible window, keeping the session in the persistent profile), and
+ * `account` (check whether the profile holds a signed-in Google account).
+ * Register it with DSH's
  * `@deepseek-ai/dsh-mcp-client` (transport: stdio) and the agent gets the native
  * `mcp__chinchilla-websearch__*` tools.
  *
@@ -18,6 +21,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
 import { googleSearch } from './search.mjs'
 import { fetchPage, searchAndFetch } from './fetch.mjs'
+import { googleLogin, checkGoogleAccount } from './login.mjs'
 
 /**
  * Serialize tool calls: Chrome allows only one process per user-data-dir, so
@@ -42,15 +46,39 @@ function readScreenshotAsImageBlock(path) {
   return null
 }
 
+/** Render Google's AI Overview (AI-generated answer + cited references), if present. */
+function formatAiOverview(ai, indent = '') {
+  if (!ai || !ai.present) return null
+  const lines = []
+  lines.push(`${indent}── AI Overview (Google's AI-generated answer) ──────────────────`)
+  if (ai.text) lines.push(ai.text.split('\n').map((l) => `${indent}${l}`).join('\n'))
+  if (ai.references && ai.references.length > 0) {
+    lines.push('')
+    lines.push(`${indent}References cited by Google:`)
+    ai.references.forEach((r, i) => {
+      lines.push(`${indent} ${i + 1}. ${r.title || r.url}`)
+      lines.push(`${indent}    ${r.url}`)
+    })
+  }
+  lines.push(`${indent}──────────────────────────────────────────────────────────────`)
+  return lines.join('\n')
+}
+
 function formatResults(outcome) {
   const lines = []
   lines.push(`Google search results for: ${outcome.query}`)
   if (outcome.url) lines.push(`(source: ${outcome.url})`)
   lines.push('')
+  const ai = formatAiOverview(outcome.aiOverview)
+  if (ai) {
+    lines.push(ai)
+    lines.push('')
+  }
   if (!outcome.results || outcome.results.length === 0) {
     lines.push('(no organic results returned)')
     return lines.join('\n')
   }
+  lines.push('Organic results:')
   outcome.results.forEach((r, i) => {
     lines.push(`${i + 1}. ${r.title}`)
     lines.push(`   ${r.link}`)
@@ -77,7 +105,10 @@ server.registerTool(
       'serves a human-verification (CAPTCHA) page, it opens a VISIBLE Chrome window for the human ' +
       'to solve, then continues. Use this to search Google directly. If the result is ' +
       "'verification_required', a Chrome window was opened (and a screenshot returned) — tell the " +
-      'human to complete the verification, then call search again (the verified session is kept).',
+      'human to complete the verification, then call search again (the verified session is kept). ' +
+      'If the profile is signed in with a Google account (see the login/account tools), searches ' +
+      'run as that account; that session is scoped to this plugin\'s web search only — never use ' +
+      'it for other Google services or personal data.',
     inputSchema: {
       query: z.string().min(1).describe('The search query.'),
       maxResults: z
@@ -102,6 +133,13 @@ server.registerTool(
         .boolean()
         .default(true)
         .describe('If false, never open a visible window — just report that verification is required.'),
+      aiOverview: z
+        .boolean()
+        .default(true)
+        .describe(
+          'Also capture Google\'s AI Overview (the AI-generated answer + the references it cites). ' +
+            'Set false to skip it. When Google has no AI Overview for the query, this has no effect.',
+        ),
     },
   },
   async (args, extra) =>
@@ -122,6 +160,7 @@ server.registerTool(
           hl: args.hl,
           verifyTimeoutMs: args.verifyTimeoutMs,
           autoVerify: args.autoVerify,
+          aiOverview: args.aiOverview,
           signal,
         })
       } catch (err) {
@@ -184,7 +223,10 @@ server.registerTool(
       '(Mozilla Readability). Returns the article text (capped), title, byline, and the final ' +
       'URL after redirects. Use this to read any webpage in depth: docs, articles, pages found ' +
       'via search or anywhere else. If a site serves a human-verification challenge (anti-bot ' +
-      'slider), a visible Chrome window is opened for the human to solve it (autoVerify).',
+      'slider), a visible Chrome window is opened for the human to solve it (autoVerify). ' +
+      'The profile may hold a signed-in Google account scoped to search: do NOT use this tool ' +
+      'to open or extract the user\'s private pages (Gmail, Drive, personal pages) or any ' +
+      'personal data — public web content in service of a search task only.',
     inputSchema: {
       url: z.string().url().describe('The page URL to fetch (http/https).'),
       maxChars: z
@@ -278,6 +320,11 @@ function formatSearchAndFetch(outcome) {
   lines.push(`Google search: ${outcome.query}`)
   lines.push(`Fetched ${outcome.pages.length} of ${outcome.resultCount} results (source: ${outcome.searchUrl})`)
   if (outcome.verifiedViaHuman) lines.push('(search completed via human verification)')
+  const ai = formatAiOverview(outcome.aiOverview)
+  if (ai) {
+    lines.push('')
+    lines.push(ai)
+  }
   lines.push('')
   outcome.pages.forEach((p, i) => {
     lines.push(`=== Result ${i + 1}: ${p.title || p.url} ===`)
@@ -299,7 +346,9 @@ server.registerTool(
       'Run a Google web search, then render the top N result pages with the local Chrome and ' +
       'extract their readable main content. Returns each page as article text (capped per page). ' +
       'Use this when the search snippets are not enough and you need the actual content of the ' +
-      'top pages. Slower than plain search (~1-3 s per page).',
+      'top pages. Slower than plain search (~1-3 s per page). If the profile is signed in with ' +
+      'a Google account, the session is scoped to this plugin\'s web search only — never use ' +
+      'it for other Google services or personal data.',
     inputSchema: {
       query: z.string().min(1).describe('The search query.'),
       maxResults: z
@@ -339,6 +388,13 @@ server.registerTool(
           'If Google or a result page serves a human-verification challenge, open a visible ' +
           'Chrome window and wait for the human to solve it (default true).',
         ),
+      aiOverview: z
+        .boolean()
+        .default(true)
+        .describe(
+          'Also capture Google\'s AI Overview (the AI-generated answer + the references it cites) ' +
+            'from the search. Set false to skip it.',
+        ),
     },
   },
   async (args) =>
@@ -360,6 +416,7 @@ server.registerTool(
           hl: args.hl,
           verifyTimeoutMs: args.verifyTimeoutMs,
           autoVerify: args.autoVerify,
+          aiOverview: args.aiOverview,
           log,
         })
       } catch (err) {
@@ -390,6 +447,133 @@ server.registerTool(
       const img = readScreenshotAsImageBlock(outcome.screenshot)
       if (img) content.push(img)
       return { isError: true, content }
+    }),
+)
+
+// ---------------------------------------------------------------------------
+// login: sign in with a Google account in a visible window
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  'login',
+  {
+    title: 'Sign in with a Google account (visible window)',
+    description:
+      'Open a VISIBLE Chrome window pointed at Google\'s account page so the human can sign in ' +
+      'with their own Google account; the session is then stored in the plugin\'s persistent ' +
+      'profile, so later searches run as that real, signed-in account (far more trusted than ' +
+      'anonymous traffic — CAPTCHAs become much rarer and the session lasts a long time). The ' +
+      'agent NEVER sees the credentials — the human types them directly into the real Chrome ' +
+      'window; never ask for, handle, or transmit them. The resulting session is scoped to ' +
+      'this plugin\'s web search only — never use it for other Google services (Gmail, Drive, ' +
+      '…) or personal data. Call this when the user wants to "log into Google" / "use my ' +
+      'account" / keep a long-lived trusted session. Then tell the human to complete the ' +
+      'sign-in in the opened window and let you know when it\'s done (or the window is closed ' +
+      '/ it times out).',
+    inputSchema: {
+      waitMs: z
+        .number()
+        .int()
+        .min(10000)
+        .max(1800000)
+        .default(300000)
+        .describe('How long (ms) to wait for the human to complete the sign-in (default 300000 = 5 min).'),
+      startUrl: z
+        .string()
+        .url()
+        .default('https://accounts.google.com/SignOutOptions')
+        .describe(
+          'The page to open in the visible window (default: Google\'s account page, which shows the sign-in form when signed out).',
+        ),
+    },
+  },
+  async (args, extra) =>
+    withLock(async () => {
+      const signal = extra && extra.signal
+      const log = (msg) => {
+        try {
+          console.error(`[google-chrome-search] ${msg}`)
+        } catch {
+          /* ignore */
+        }
+      }
+      let outcome
+      try {
+        outcome = await googleLogin({
+          waitMs: args.waitMs,
+          startUrl: args.startUrl,
+          signal,
+          log,
+        })
+      } catch (err) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Google login failed: ${err && err.message ? err.message : String(err)}` }],
+        }
+      }
+      const ok = outcome.status === 'logged_in' || outcome.status === 'already_signed_in'
+      const content = [
+        {
+          type: 'text',
+          text:
+            `${ok ? 'Google sign-in complete.' : 'Google sign-in did not complete.\n'}` +
+            `${outcome.message || ''}\n` +
+            `Status: ${outcome.status}\n` +
+            (outcome.account ? `Account: ${outcome.account}\n` : '') +
+            `Profile: ${outcome.profileDir}\n`,
+        },
+      ]
+      return ok ? { content } : { isError: true, content }
+    }),
+)
+
+// ---------------------------------------------------------------------------
+// account: check whether the profile holds a signed-in Google account
+// ---------------------------------------------------------------------------
+
+server.registerTool(
+  'account',
+  {
+    title: 'Check Google account session in the profile',
+    description:
+      'Check (headless, no window) whether the plugin\'s persistent profile currently holds a ' +
+      'signed-in Google account. Returns the account label (usually the email) when present. ' +
+      'Use this to see whether the "login" tool has already been run and whether searches ' +
+      'currently run with a Google account. The account label is identity information only — ' +
+      'the session behind it is scoped to this plugin\'s web search, never to other Google ' +
+      'services or personal data.',
+    inputSchema: {},
+  },
+  async () =>
+    withLock(async () => {
+      const log = (msg) => {
+        try {
+          console.error(`[google-chrome-search] ${msg}`)
+        } catch {
+          /* ignore */
+        }
+      }
+      let outcome
+      try {
+        outcome = await checkGoogleAccount({ log })
+      } catch (err) {
+        return {
+          isError: true,
+          content: [{ type: 'text', text: `Account check failed: ${err && err.message ? err.message : String(err)}` }],
+        }
+      }
+      const ok = outcome.status === 'logged_in'
+      const content = [
+        {
+          type: 'text',
+          text:
+            `${outcome.status === 'logged_in' ? 'Profile is signed in with a Google account.' : 'Profile has no Google account session.\n'}` +
+            `${outcome.message || ''}\n` +
+            (outcome.account ? `Account: ${outcome.account}\n` : '') +
+            `Profile: ${outcome.profileDir}\n`,
+        },
+      ]
+      return ok ? { content } : { isError: true, content }
     }),
 )
 

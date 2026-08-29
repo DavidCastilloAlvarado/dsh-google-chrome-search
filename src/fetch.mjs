@@ -483,6 +483,7 @@ export async function searchAndFetch(query, opts = {}) {
     hl: opts.hl,
     verifyTimeoutMs: opts.verifyTimeoutMs,
     autoVerify: opts.autoVerify,
+    aiOverview: opts.aiOverview,
     chromePath: opts.chromePath,
     profileDir,
     log,
@@ -509,6 +510,7 @@ export async function searchAndFetch(query, opts = {}) {
       resultCount: search.results.length,
       searchUrl: search.url,
       verifiedViaHuman: search.verifiedViaHuman,
+      aiOverview: search.aiOverview,
       pages: targets.map((t) => ({
         url: t.link, title: t.title, snippet: t.snippet,
         status: 'error', message: `Could not launch Chrome: ${err && err.message ? err.message : String(err)}`,
@@ -584,6 +586,7 @@ export async function searchAndFetch(query, opts = {}) {
     resultCount: search.results.length,
     searchUrl: search.url,
     verifiedViaHuman: search.verifiedViaHuman,
+    aiOverview: search.aiOverview,
     pages,
   }
 }
