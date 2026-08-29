@@ -9,6 +9,7 @@
  *   dsh-google-search account
  *   dsh-google-search install-browser [--force]
  *   dsh-google-search mcp
+ *   dsh-google-search --version
  *   node bin/google-search.mjs "<query>" [options]
  *
  * install-browser options:
@@ -58,10 +59,13 @@
  *   --profile <dir>        persistent Chrome profile dir
  */
 
+import { readFileSync } from 'node:fs'
 import { googleSearch, defaultProfileDir } from '../src/search.mjs'
 import { fetchPage, searchAndFetch } from '../src/fetch.mjs'
 import { installBrowser } from '../src/browser.mjs'
 import { googleLogin, checkGoogleAccount } from '../src/login.mjs'
+
+const PKG_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 
 function parseArgs(argv) {
   const opts = {}
@@ -134,6 +138,9 @@ function parseArgs(argv) {
       case '-h':
       case '--help':
         opts.help = true
+        break
+      case '--version':
+        opts.version = true
         break
       default:
         if (a.startsWith('--')) {
@@ -261,7 +268,12 @@ async function main() {
     '  dsh-google-search account                                    check the profile for a signed-in Google account\n' +
     '  dsh-google-search install-browser [--force]   download Chrome for Testing (self-contained setup)\n' +
     '  dsh-google-search mcp                         run the MCP stdio server\n' +
+    '  dsh-google-search --version                   show the installed package version\n' +
     'See header comment for options.\n'
+  if (opts.version) {
+    console.log(PKG_VERSION)
+    process.exit(0)
+  }
   if (opts.help || (!opts.query && !sub)) {
     if (opts.help) console.log(text)
     else process.stderr.write(text)
