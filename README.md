@@ -314,7 +314,7 @@ and it just works).
 
 Releases are manual and tokenless — the same methodology as
 `chinchilla-llm-router`. From the GitHub **Actions** tab, run the `release`
-workflow with an input like `v1.0.0`:
+workflow with an input like `v1.0.1`:
 
 1. **Before dispatching**: bump `version` in `package.json` to the release
    version (CI never rewrites versions) and commit.

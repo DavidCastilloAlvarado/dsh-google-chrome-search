@@ -1,6 +1,6 @@
 {
   "name": "dsh-google-chrome-search",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Google web search + page content extraction for AI agents: drives your local Chrome over CDP (no API key) with a human-verification (CAPTCHA) fallback. Ships as a CLI, an MCP stdio server, and a DSH skill.",
   "type": "module",
   "license": "MIT",
