@@ -265,50 +265,56 @@ gracefully.
 
 ## FAQ
 
-**Which browser gets used, and how is it detected?**
-Nothing to configure. The resolution chain (first hit wins):
-`--chrome` flag → `CHROME_PATH` env → bundled Chrome for Testing (if you ran
-`install-browser`) → well-known system paths (Linux: `/usr/bin/google-chrome`,
-`google-chrome-stable`, `chromium`, `chromium-browser`, `/opt/google/chrome/chrome`;
-macOS: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`) → bare
-`google-chrome` / `chromium` on `PATH`. If several browsers are installed, this
-order decides — pin one explicitly with `CHROME_PATH` or `--chrome`.
+**How is the browser chosen?**
+First hit wins:
 
-**I don't have a browser installed. What now?**
-Run it once — it downloads a dedicated Chrome for Testing (~170 MB) into the
-profile dir and then uses it automatically:
+1. `--chrome` flag
+2. `CHROME_PATH` env
+3. bundled Chrome for Testing (if you ran `install-browser`)
+4. well-known system paths (table below)
+5. bare `google-chrome` / `chromium` on `PATH`
+
+Several browsers installed? That order decides — pin one with `CHROME_PATH` or `--chrome`.
+
+| OS | Paths checked |
+|---|---|
+| Linux | `/usr/bin/google-chrome` · `/usr/bin/google-chrome-stable` · `/usr/bin/chromium` · `/usr/bin/chromium-browser` · `/opt/google/chrome/chrome` |
+| macOS | `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` |
+
+**No browser installed?**
+Install the bundled Chrome for Testing once (~170 MB); it is used automatically from then on:
+
 ```sh
 npx dsh-google-chrome-search install-browser
 ```
-Or install a system browser (`sudo apt install google-chrome-stable` /
-`brew install --cask google-chrome`). Note: on a bare headless Linux server the
-system shared libraries (`libnss3`, `libgbm`, `libasound2`, …) may still be
-needed even with the bundled browser.
 
-**Where are the cookies / trusted session stored?**
-In the dedicated profile dir: `~/.dsh-chrome-google/` (override with
-`GSEARCH_PROFILE` or `--profile`). Google's session cookies are at
-`~/.dsh-chrome-google/Default/Cookies` (standard Chrome layout); CAPTCHA
-screenshots land in `~/.dsh-chrome-google/screenshots/`. **Deleting the folder
-resets your trusted session** — the next search will likely hit a CAPTCHA again.
-The plugin never touches your personal Chrome profile; the system binary is only
-used as the executable.
+Or install a system browser (`sudo apt install google-chrome-stable` / `brew install --cask google-chrome`). On a bare headless Linux server, shared libraries may still be missing (`libnss3`, `libgbm`, `libasound2`, …).
 
-**Where does the bundled browser live?**
-`~/.dsh-chrome-google/browser/` plus a small marker, `browser-info.json`, in the
-profile dir. Delete both to remove it (the plugin falls back to system browsers).
+**Where are the cookies, screenshots, and bundled browser?**
+Everything lives in the profile dir — `~/.dsh-chrome-google/` by default (override: `GSEARCH_PROFILE` or `--profile`):
 
-**My `CHROME_PATH` doesn't seem to work?**
-It is used **as-is, without an existence check** — a typo or a moved binary fails
-loudly at launch. Verify the path yourself (`/path/to/chrome --version`), and
-remember it overrides *everything* below it in the chain, including the bundled
-browser.
+| What | Where |
+|---|---|
+| Google session cookies (trusted session) | `~/.dsh-chrome-google/Default/Cookies` |
+| CAPTCHA screenshots | `~/.dsh-chrome-google/screenshots/` |
+| Bundled Chrome for Testing | `~/.dsh-chrome-google/browser/` + `browser-info.json` marker |
 
-**I'm on a headless server / SSH. Does it still work?**
-Yes — search and fetch run headless, and CAPTCHA detection still reports with a
-screenshot. Only the "open a visible window for the human to solve it" step needs
-a display: a desktop session, or Xvfb/VNC. Without one, you get
-`verification_required` plus the screenshot instead of a window.
+Deleting the folder resets the trusted session — the next search likely hits a CAPTCHA again. Your personal Chrome profile is never touched.
+
+**`CHROME_PATH` is set but doesn't work?**
+It is used as-is, **no existence check** — a typo or moved binary fails at launch. Test it yourself:
+
+```sh
+/path/to/chrome --version
+```
+
+Note it overrides everything below it in the chain, including the bundled browser.
+
+**Headless server / SSH?**
+
+- Search and fetch: fully headless, works fine.
+- CAPTCHA: detected and reported with a screenshot.
+- The "open a window for the human" step needs a display (desktop, or Xvfb/VNC); without one you get `verification_required` + the screenshot.
 
 ## Troubleshooting
 
