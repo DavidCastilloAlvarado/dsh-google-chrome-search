@@ -1,9 +1,11 @@
 /**
  * dsh-google-chrome-search — MCP stdio server.
  *
- * Exposes a `search` tool that runs a Google web search by driving the local Chrome.
- * Register it with DSH's `@deepseek-ai/dsh-mcp-client` (transport: stdio) and the
- * agent gets a native `mcp__google__search` tool.
+ * Exposes three tools: `search` (Google web search by driving the local Chrome),
+ * `fetch` (render a URL + extract readable content), and `search_and_fetch`
+ * (search + read the top N pages). Register it with DSH's
+ * `@deepseek-ai/dsh-mcp-client` (transport: stdio) and the agent gets the native
+ * `mcp__chinchilla-websearch__*` tools.
  *
  * NOTE: stdout is the JSON-RPC channel — all human/progress logging MUST go to
  * stderr. The `googleSearch` log callback is wired to console.error below.

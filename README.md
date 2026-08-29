@@ -23,7 +23,7 @@ tries to solve a CAPTCHA itself.
 |---|---|---|
 | Core engine | `src/search.mjs` | Chrome/CDP Google search + CAPTCHA verification + result extraction |
 | Page engine | `src/fetch.mjs` | Render any URL + extract readable content (Mozilla Readability) + `search_and_fetch` |
-| MCP server | `src/server.mjs` | Exposes `search`, `fetch`, `search_and_fetch` over stdio → native `mcp__google__*` in DSH |
+| MCP server | `src/server.mjs` | Exposes `search`, `fetch`, `search_and_fetch` over stdio → native `mcp__chinchilla-websearch__*` in DSH |
 | CLI | `bin/google-search.mjs` | `dsh-google-search "<query>"`, `fetch "<url>"`, `install-browser`, `mcp` — direct use / npx |
 | Skill | `skill/SKILL.md` | Teaches the agent how to use it + the human-verification workflow |
 
@@ -160,10 +160,15 @@ works on any machine with Node:
         transport: stdio
         command: npx
         args: [ "-y", "dsh-google-chrome-search", "mcp" ]
-        env:
-          CHROME_PATH: /usr/bin/google-chrome   # optional — auto-detected if unset
         toolCallTimeoutMs: 300000
 ```
+
+**No `env` block needed** — the browser is auto-detected (standard Chrome/Chromium
+locations on Linux *and* macOS, plus `PATH`), and the profile defaults to
+`~/.dsh-chrome-google` (created on first run). Only if auto-detection misses your
+browser, add an `env:` block with the full path — e.g.
+`CHROME_PATH: /path/to/your/browser` (and optionally `GSEARCH_PROFILE: /path/to/dir`
+to move the trusted session).
 
 (Or, with the repo checked out, point at the files directly:
 `command: /path/to/node`, `args: [ /path/to/dsh-google-chrome-search/src/server.mjs ]`.)
@@ -172,9 +177,9 @@ After a DSH restart, the agent gets three native tools:
 
 | Tool | What it does |
 |---|---|
-| `mcp__google__search` | Google web search → links + snippets |
-| `mcp__google__fetch` | Render one URL → extracted readable content (title, byline, text, optional HTML/screenshot) |
-| `mcp__google__search_and_fetch` | Search → render the top N pages → per-page extracted content in one call |
+| `mcp__chinchilla-websearch__search` | Google web search → links + snippets |
+| `mcp__chinchilla-websearch__fetch` | Render one URL → extracted readable content (title, byline, text, optional HTML/screenshot) |
+| `mcp__chinchilla-websearch__search_and_fetch` | Search → render the top N pages → per-page extracted content in one call |
 
 Notes:
 
