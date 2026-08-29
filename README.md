@@ -263,6 +263,53 @@ listed, and — if a Chrome binary is available on the machine — performs a li
 `autoVerify: false`. In environments without a browser (e.g. CI) the live call is skipped
 gracefully.
 
+## FAQ
+
+**Which browser gets used, and how is it detected?**
+Nothing to configure. The resolution chain (first hit wins):
+`--chrome` flag → `CHROME_PATH` env → bundled Chrome for Testing (if you ran
+`install-browser`) → well-known system paths (Linux: `/usr/bin/google-chrome`,
+`google-chrome-stable`, `chromium`, `chromium-browser`, `/opt/google/chrome/chrome`;
+macOS: `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`) → bare
+`google-chrome` / `chromium` on `PATH`. If several browsers are installed, this
+order decides — pin one explicitly with `CHROME_PATH` or `--chrome`.
+
+**I don't have a browser installed. What now?**
+Run it once — it downloads a dedicated Chrome for Testing (~170 MB) into the
+profile dir and then uses it automatically:
+```sh
+npx dsh-google-chrome-search install-browser
+```
+Or install a system browser (`sudo apt install google-chrome-stable` /
+`brew install --cask google-chrome`). Note: on a bare headless Linux server the
+system shared libraries (`libnss3`, `libgbm`, `libasound2`, …) may still be
+needed even with the bundled browser.
+
+**Where are the cookies / trusted session stored?**
+In the dedicated profile dir: `~/.dsh-chrome-google/` (override with
+`GSEARCH_PROFILE` or `--profile`). Google's session cookies are at
+`~/.dsh-chrome-google/Default/Cookies` (standard Chrome layout); CAPTCHA
+screenshots land in `~/.dsh-chrome-google/screenshots/`. **Deleting the folder
+resets your trusted session** — the next search will likely hit a CAPTCHA again.
+The plugin never touches your personal Chrome profile; the system binary is only
+used as the executable.
+
+**Where does the bundled browser live?**
+`~/.dsh-chrome-google/browser/` plus a small marker, `browser-info.json`, in the
+profile dir. Delete both to remove it (the plugin falls back to system browsers).
+
+**My `CHROME_PATH` doesn't seem to work?**
+It is used **as-is, without an existence check** — a typo or a moved binary fails
+loudly at launch. Verify the path yourself (`/path/to/chrome --version`), and
+remember it overrides *everything* below it in the chain, including the bundled
+browser.
+
+**I'm on a headless server / SSH. Does it still work?**
+Yes — search and fetch run headless, and CAPTCHA detection still reports with a
+screenshot. Only the "open a visible window for the human to solve it" step needs
+a display: a desktop session, or Xvfb/VNC. Without one, you get
+`verification_required` plus the screenshot instead of a window.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -270,7 +317,7 @@ gracefully.
 | `Could not find Chrome` / launch error | Run `dsh-google-search install-browser`, or install Chrome/Chromium, or set `CHROME_PATH` / `--chrome` |
 | Runs as root in a container, sandbox error | The default is `--no-sandbox` (for isolation); if you want the sandbox on, pass `noSandbox: false` |
 | CAPTCHA on every search | Keep the dedicated profile (`~/.dsh-chrome-google`) — deleting it resets the "verified" cookies. Datacenter IPs get CAPTCHAs more often. |
-| No visible window appears on SSH | Use a machine with a display, or set `autoVerify: false` and solve the CAPTCHA manually in the printed screenshot's browser context. |
+| No visible window appears (SSH / headless) | A window needs a display: use a desktop machine or Xvfb/VNC — or set `autoVerify: false` / `--no-verify` to just report the CAPTCHA with a screenshot (see FAQ) |
 | `ECONNREFUSED` / stale lock in the profile | Close all Chrome instances using that profile, then retry (the profile is separate from your personal one). Don't run two CLI calls at once — one process per profile. |
 | `fetch` opens a window with a slider / "confirm you are human" | That's the human-verification step working as intended: pass the challenge in the window, then it retries and keeps the session. `--no-verify` skips the window and just reports `blocked`. |
 | `fetch` returns `blocked` (no window) | The site walls off headless browsers and `autoVerify` is off (or no display). Try a different source for the same topic, or run with verification enabled. |
