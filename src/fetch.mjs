@@ -117,13 +117,14 @@ function pdfFileName(u, fallback) {
   }
 }
 
-/** Write the PDF bytes into `dir` (unique name on collision), return the path. */
-function savePdfFile(dir, name, buf) {
+/** Write the file bytes into `dir` (unique name on collision), return the path. */
+function saveFile(dir, name, buf) {
   fs.mkdirSync(dir, { recursive: true })
   let p = path.join(dir, name)
   let i = 1
+  const ext = path.extname(name)
   while (fs.existsSync(p)) {
-    p = path.join(dir, `${path.basename(name, '.pdf')}-${i++}.pdf`)
+    p = path.join(dir, `${path.basename(name, ext)}-${i++}${ext}`)
   }
   fs.writeFileSync(p, buf)
   return p
@@ -151,12 +152,146 @@ async function downloadPdf(page, pdfUrl, downloadDir, log) {
     if (!buf.subarray(0, 5).toString('latin1').startsWith('%PDF')) {
       return { ok: false, reason: 'the server did not return a PDF (likely still a challenge page)' }
     }
-    const p = savePdfFile(downloadDir, pdfFileName(pdfUrl, `document-${Date.now()}.pdf`), buf)
+    const p = saveFile(downloadDir, pdfFileName(pdfUrl, `document-${Date.now()}.pdf`), buf)
     log(`downloaded PDF (${buf.length} bytes) -> ${p}`)
     return { ok: true, path: p, size: buf.length }
   } catch (err) {
     log(`PDF download failed: ${err && err.message ? err.message : String(err)}`)
     return { ok: false, reason: err && err.message ? err.message : String(err) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Media file handling (image / video / audio / font / unknown binary)
+//
+// Like a PDF, a media URL loads a BROWSER-INTERNAL viewer in Chrome (the image
+// viewer, the media player), whose DOM is an EMPTY document — the exact shape
+// the wall heuristics mistake for an anti-bot challenge, which then hands the
+// page to the human and waits (verifyTimeoutMs) for text an image will never
+// produce: the MCP call hangs until the human closes the window and no
+// screenshot/file is returned. A media file is therefore detected early (same
+// rule as PDFs: never mistaken for a wall) and downloaded instead of
+// text-extracted.
+// ---------------------------------------------------------------------------
+
+/** Media kind from an authoritative response content-type, or null. */
+function mediaKindFromCt(ct) {
+  if (/^image\//i.test(ct)) return 'image'
+  if (/^video\//i.test(ct)) return 'video'
+  if (/^audio\//i.test(ct)) return 'audio'
+  if (/^font\//i.test(ct)) return 'font'
+  if (/^application\/octet-stream$/i.test(ct)) return 'binary'
+  return null
+}
+
+/** File extension for a media content-type (used when the URL has none). */
+const MEDIA_EXT_BY_SUBTYPE = {
+  'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp',
+  'image/avif': 'avif', 'image/bmp': 'bmp', 'image/x-icon': 'ico', 'image/svg+xml': 'svg',
+  'image/tiff': 'tiff',
+  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov', 'video/x-matroska': 'mkv',
+  'audio/mpeg': 'mp3', 'audio/wav': 'wav', 'audio/ogg': 'ogg', 'audio/webm': 'webm', 'audio/mp4': 'm4a',
+  'application/octet-stream': 'bin',
+}
+
+function mediaExtFromCt(ct) {
+  return MEDIA_EXT_BY_SUBTYPE[(ct || '').split(';')[0].trim().toLowerCase()] || ''
+}
+
+/** True if the URL path ends in a common image extension. */
+function isImageUrl(u) {
+  try {
+    return /\.(png|jpe?g|jfif|gif|webp|avif|bmp|svg|ico|tiff?)$/i.test(
+      decodeURIComponent(new URL(u).pathname)
+    )
+  } catch {
+    return false
+  }
+}
+
+/** A safe file name for a downloaded media file, derived from the URL. */
+function mediaFileName(u, ext) {
+  try {
+    const raw = decodeURIComponent(new URL(u).pathname).split('/').filter(Boolean).pop() || ''
+    const name = (raw || `media-${Date.now()}`).replace(/[^\w.-]+/g, '-').slice(0, 120)
+    if (/\.\w{2,5}$/.test(name)) return name
+    return ext ? `${name}.${ext}` : `${name}-${Date.now()}`
+  } catch {
+    return `media-${Date.now()}${ext ? `.${ext}` : ''}`
+  }
+}
+
+/**
+ * Download a media file using the page's own session cookies, so a
+ * verification cookie the human earned is sent along. Returns
+ * { ok: true, path, size } or { ok: false, reason }.
+ */
+async function downloadMedia(page, mediaUrl, downloadDir, log, ext = '') {
+  try {
+    const cookies = await page.cookies(mediaUrl).catch(() => [])
+    const headers = {
+      'user-agent': PDF_UA,
+      accept: '*/*',
+      'accept-language': 'en-US,en;q=0.9',
+    }
+    if (cookies.length > 0) headers.cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ')
+    const cur = page.url() || ''
+    if (cur && /^https?:/.test(cur) && cur !== mediaUrl) headers.referer = cur
+    const res = await fetch(mediaUrl, { headers, redirect: 'follow' })
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` }
+    if (buf.length === 0) return { ok: false, reason: 'empty response' }
+    const p = saveFile(downloadDir, mediaFileName(mediaUrl, ext), buf)
+    log(`downloaded media file (${buf.length} bytes) -> ${p}`)
+    return { ok: true, path: p, size: buf.length }
+  } catch (err) {
+    log(`media download failed: ${err && err.message ? err.message : String(err)}`)
+    return { ok: false, reason: err && err.message ? err.message : String(err) }
+  }
+}
+
+/**
+ * Build the outcome object for a URL that turned out to be a media file
+ * (image / video / audio / font), not a web page. `dl` is the full-file
+ * download. For images, the downloaded file doubles as the `screenshot` — it
+ * IS the image, untouched (better than a re-rendered viewer screenshot).
+ */
+function mediaOutcome({ url, finalUrl, dl, kind, mimeType, verifiedViaHuman = false }) {
+  const label =
+    kind === 'image' ? 'image'
+    : kind === 'video' ? 'video'
+    : kind === 'audio' ? 'audio'
+    : kind === 'font' ? 'font'
+    : 'binary file'
+  const size = dl.ok ? ` (${(dl.size / 1024).toFixed(1)} KB)` : ''
+  let message
+  if (dl.ok) {
+    message =
+      `This URL is a ${label} (${mimeType || kind}), not a web page — its content cannot be ` +
+      `text-extracted. The file was downloaded to: ${dl.path}${size}. ` +
+      (kind === 'image' ? 'Read it as an image (e.g. with an image tool).' : 'Use the file directly.')
+  } else {
+    message =
+      `This URL is a ${label} (${mimeType || kind}), not a web page — its content cannot be ` +
+      `text-extracted. Automatic download failed (${dl.reason}).`
+  }
+  return {
+    status: 'ok',
+    url,
+    finalUrl,
+    media: true,
+    mediaKind: kind,
+    mediaType: mimeType || '',
+    mediaPath: dl.ok ? dl.path : null,
+    mediaSize: dl.ok ? dl.size : null,
+    title: '',
+    readable: false,
+    text: '',
+    truncated: false,
+    textLength: 0,
+    verifiedViaHuman,
+    screenshot: kind === 'image' && dl.ok ? dl.path : null,
+    message,
   }
 }
 
@@ -454,13 +589,42 @@ async function fetchUrlOnPage(page, url, o) {
     }
     return pdfOutcome({ url, finalUrl, dl, shots })
   }
+  // --- Media detection (before the wall / block heuristics): like PDFs, a
+  // media URL loads a browser-internal viewer with an EMPTY document — the
+  // exact shape the wall heuristics mistake for an anti-bot challenge, which
+  // would hand the page to the human and wait for text it can never produce
+  // (the call hangs). Media files are downloaded instead of text-extracted.
+  // The content-type is authoritative for image/video/audio/font; an
+  // octet-stream is only trusted below, together with the empty-document
+  // shape (a misconfigured server may label HTML as octet-stream).
+  const mkind = mediaKindFromCt(ct)
+  if (mkind && mkind !== 'binary') {
+    const mime = ct.split(';')[0].trim()
+    log(`URL is a media file (${mkind}, ${mime}) — downloading instead of extracting`)
+    const dl = await downloadMedia(page, finalUrl, o.downloadDir, log, mediaExtFromCt(ct))
+    return mediaOutcome({ url, finalUrl, dl, kind: mkind, mimeType: mime })
+  }
   const bodyInfo = await page
     .evaluate(() => {
       const b = document.body
-      return { len: (b && b.innerText) || '', children: b ? b.children.length : -1 }
+      return {
+        len: (b && b.innerText) || '',
+        children: b ? b.children.length : -1,
+        // Chrome's image/media viewer renders a single <img>/<video>/<audio>
+        // element in an otherwise empty document (the PDFium viewer, by
+        // contrast, has ZERO children). Record the first child's tag for the
+        // media fallback below.
+        firstTag: b && b.children.length === 1 ? b.children[0].tagName : '',
+      }
     })
     .catch(() => null)
   const viewerShape = bodyInfo !== null && bodyInfo.len.length < 10 && bodyInfo.children === 0
+  // The image/media viewer shape: a lone media element, no text.
+  const mediaViewerShape =
+    bodyInfo !== null &&
+    bodyInfo.len.length < 10 &&
+    bodyInfo.children === 1 &&
+    /^(IMG|VIDEO|AUDIO)$/.test(bodyInfo.firstTag || '')
   // The URL-based fallback (no authoritative content-type) must not fire on a
   // 4xx/5xx response: an empty 401/403 at a .pdf URL is an auth failure, not
   // a PDF — that case keeps the wall → human-verify behavior.
@@ -482,6 +646,29 @@ async function fetchUrlOnPage(page, url, o) {
       shots = await viewerPageImages(page, o.shotDir, o.pdfPages, log)
     }
     return pdfOutcome({ url, finalUrl, dl, shots })
+  }
+  // DOM-based media fallback (no authoritative content-type): Chrome's image
+  // viewer renders a lone <img> (or <video>/<audio>) in an otherwise empty
+  // document — that shape is a media file, not a wall. (The old code mistook
+  // it for a soft anti-bot wall and waited for the human, hanging the call.)
+  // Gated on an image-URL extension or an octet-stream, and — like the .pdf
+  // fallback above — must not fire on a 4xx/5xx response (an empty 401/403
+  // at a .png URL is an auth failure, not media).
+  if (
+    (navStatus === null || navStatus < 400) &&
+    !/text\/html/i.test(ct) &&
+    (mediaViewerShape || (mkind === 'binary' && viewerShape)) &&
+    (mkind === 'binary' || isImageUrl(url) || isImageUrl(finalUrl))
+  ) {
+    const kind =
+      mkind === 'binary' ? 'binary'
+      : bodyInfo.firstTag === 'VIDEO' ? 'video'
+      : bodyInfo.firstTag === 'AUDIO' ? 'audio'
+      : 'image'
+    const mime = ct ? ct.split(';')[0].trim() : ''
+    log(`URL is a media file (${kind}${mime ? `, ${mime}` : ''}) — downloading instead of extracting`)
+    const dl = await downloadMedia(page, finalUrl, o.downloadDir, log, mediaExtFromCt(mime))
+    return mediaOutcome({ url, finalUrl, dl, kind, mimeType: mime || (kind === 'image' ? 'image/*' : 'application/octet-stream') })
   }
 
   const raw = await extractFromPage(page)
@@ -577,6 +764,7 @@ const WALL_HINTS = [
 function isWall(p) {
   if (p.status !== 'ok') return false
   if (p.pdf) return false // a PDF is content, not a wall (its text is empty by design)
+  if (p.media) return false // a media file is content, not a wall (its text is empty by design)
   const text = (p.text || '').trim()
   if (text.length >= 300) return false
   // A near-empty shell (< 20 chars) is still treated as a wall: the challenge
@@ -653,12 +841,17 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
     const deadline = Date.now() + verifyTimeoutMs
     let solved = false
     let solvedAsPdf = false
+    let solvedAsMedia = null
     while (Date.now() < deadline) {
       await sleep(2000)
       const st = await page
         .evaluate(() => {
           const b = document.body
-          return { len: (b && b.innerText) || '', children: b ? b.children.length : -1 }
+          return {
+            len: (b && b.innerText) || '',
+            children: b ? b.children.length : -1,
+            firstTag: b && b.children.length === 1 ? b.children[0].tagName : '',
+          }
         })
         .catch(() => null)
       if (st === null) break // the human closed the window
@@ -683,6 +876,21 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
         solvedAsPdf = true
         break
       }
+      // Same, for media files: an image/video/audio target has an empty
+      // viewer document that would never look "solved" either.
+      const mkindNow = isPdfNow ? null : mediaKindFromCt(mime)
+      // The image viewer shape is a LONE <img>/<video>/<audio> (children ===
+      // 1); the empty shape (children === 0) covers a broken/undecoded media
+      // element. The PDFium viewer is children === 0 too, but is handled above.
+      const mediaViewerNow =
+        st.len.length < 10 &&
+        (st.children === 0 || (st.children === 1 && /^(IMG|VIDEO|AUDIO)$/.test(st.firstTag || ''))) &&
+        !/text\/html/i.test(mime)
+      const isMediaNow = mkindNow !== null || (isImageUrl(cur) && mediaViewerNow)
+      if (hostOf(cur) !== null && hostOf(cur) === hostOf(url) && isMediaNow) {
+        solvedAsMedia = { kind: mkindNow || 'image', mime: mime || '' }
+        break
+      }
     }
     if (solvedAsPdf) {
       const finalUrl = page.url() || url
@@ -695,6 +903,19 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
         shots = await viewerPageImages(page, shotDir, pdfPages, log)
       }
       return pdfOutcome({ url, finalUrl, dl, shots, verifiedViaHuman: true })
+    }
+    if (solvedAsMedia) {
+      const finalUrl = page.url() || url
+      log('challenge passed — the page is a media file; downloading and closing the window')
+      const dl = await downloadMedia(page, finalUrl, downloadDir, log, mediaExtFromCt(solvedAsMedia.mime))
+      return mediaOutcome({
+        url,
+        finalUrl,
+        dl,
+        kind: solvedAsMedia.kind,
+        mimeType: solvedAsMedia.mime || (solvedAsMedia.kind === 'image' ? 'image/*' : 'application/octet-stream'),
+        verifiedViaHuman: true,
+      })
     }
     if (!solved) {
       const shot = await capture(page, shotDir, 'wall').catch(() => null)
@@ -768,7 +989,10 @@ async function humanVerify(url, env, chromeOpts, shotDir, log, verifyTimeoutMs, 
  *   (`verifiedViaHuman: true` when a human passed the challenge). When the URL
  *   is a PDF document the outcome has `pdf: true` (never `blocked`), with
  *   `pdfShots` (page images in `<profileDir>/screenshots`) and `pdfPath`
- *   (file in `<profileDir>/downloads`) when those succeeded.
+ *   (file in `<profileDir>/downloads`) when those succeeded. When the URL is a
+ *   media file (image/video/audio/font) the outcome has `media: true` (never
+ *   `blocked`), with `mediaPath` (file in `<profileDir>/downloads`) and, for
+ *   images, `screenshot` set to that same file (the image itself).
  */
 export async function fetchPage(url, opts = {}) {
   const env = process.env

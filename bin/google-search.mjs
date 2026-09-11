@@ -63,6 +63,9 @@
  * PDF URLs are detected and never treated as a bot-wall: the first N pages are
  * captured as images in <profile>/screenshots (read them as images — PDFs cannot
  * be text-extracted here) and the file is downloaded to <profile>/downloads.
+ * Media URLs (image/video/audio/font) are detected the same way: the file is
+ * downloaded to <profile>/downloads and the path reported (for images the
+ * image itself is attached by the MCP server) — never a human-verification wait.
  */
 
 import { readFileSync } from 'node:fs'
@@ -213,6 +216,16 @@ function printFetch(p) {
     return
   }
   console.log(`URL: ${p.finalUrl || p.url}`)
+  if (p.media) {
+    const label = p.mediaKind === 'image' ? 'image' : p.mediaKind === 'video' ? 'video' : p.mediaKind === 'audio' ? 'audio' : p.mediaKind === 'font' ? 'font' : 'media'
+    console.log(`Type: ${label} file${p.mediaType ? ` (${p.mediaType})` : ''} — not text-extracted`)
+    if (p.mediaPath) {
+      console.log(`File: ${p.mediaPath}${p.mediaSize ? ` (${(p.mediaSize / 1024).toFixed(1)} KB)` : ''}`)
+    }
+    if (p.verifiedViaHuman) console.log('Verified via human')
+    if (p.message) console.log(`\n${p.message}`)
+    return
+  }
   if (p.pdf) {
     console.log('Type: PDF document (read the images, not text-extracted)')
     for (const [i, s] of (p.pdfShots || []).entries()) {

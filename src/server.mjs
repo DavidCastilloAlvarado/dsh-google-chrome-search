@@ -15,6 +15,7 @@
  */
 
 import fs from 'node:fs'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
@@ -34,11 +35,26 @@ function withLock(fn) {
   return p
 }
 
-function readScreenshotAsImageBlock(path) {
+const IMG_MIME_BY_EXT = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.avif': 'image/avif',
+}
+
+/**
+ * Read an image file as an MCP image content block. Screenshots are PNG, but
+ * a downloaded media file can be any format (JPEG, WebP, …) — the mime type
+ * is detected from the extension, not assumed.
+ */
+function readScreenshotAsImageBlock(p) {
   try {
-    if (path && fs.existsSync(path)) {
-      const b64 = fs.readFileSync(path).toString('base64')
-      return { type: 'image', data: b64, mimeType: 'image/png' }
+    if (p && fs.existsSync(p)) {
+      const b64 = fs.readFileSync(p).toString('base64')
+      const mimeType = IMG_MIME_BY_EXT[path.extname(p).toLowerCase()] || 'image/png'
+      return { type: 'image', data: b64, mimeType }
     }
   } catch {
     /* ignore */
@@ -203,6 +219,24 @@ server.registerTool(
 
 function formatPage(p) {
   const lines = []
+  if (p.media) {
+    const label =
+      p.mediaKind === 'image' ? 'image'
+      : p.mediaKind === 'video' ? 'video'
+      : p.mediaKind === 'audio' ? 'audio'
+      : p.mediaKind === 'font' ? 'font'
+      : 'media'
+    lines.push(`(${label} file${p.mediaType ? ` — ${p.mediaType}` : ''} — its contents are not text-extracted)`)
+    lines.push(`Media URL: ${p.finalUrl || p.url}`)
+    if (p.mediaPath) {
+      lines.push(
+        `File (read ${p.mediaKind === 'image' ? 'it as an image' : 'the file directly'}): ${p.mediaPath}${p.mediaSize ? ` (${(p.mediaSize / 1024).toFixed(1)} KB)` : ''}`,
+      )
+    }
+    if (p.verifiedViaHuman) lines.push('(the page was behind a verification challenge — passed via the visible window)')
+    if (p.message) lines.push(p.message)
+    return lines.join('\n')
+  }
   if (p.pdf) {
     lines.push('(PDF document — its contents are not text-extracted)')
     lines.push(`PDF URL: ${p.finalUrl || p.url}`)
@@ -242,8 +276,12 @@ server.registerTool(
       'as images, PDFs are not text-extracted) and the full file is downloaded to the ' +
       'profile\'s downloads folder; the image blocks are attached and both paths are ' +
       'returned. Use the file (e.g. with a PDF tool) for pages beyond the captured ' +
-      'ones or exact text. If the human passes a challenge and the page turns out to ' +
-      'be a PDF, the window closes immediately. ' +
+      'ones or exact text. If the URL is an image or other media file (video/audio/' +
+      'font), it is detected (NOT treated as a bot-wall): the file is downloaded to ' +
+      'the profile\'s downloads folder and the path returned; for images the image ' +
+      'itself is attached (read it as an image) and no human-verification window is ' +
+      'opened. If the human passes a challenge and the page turns out to be a PDF ' +
+      'or a media file, the window closes immediately. ' +
       'The profile may hold a signed-in Google account scoped to search: do NOT use this tool ' +
       'to open or extract the user\'s private pages (Gmail, Drive, personal pages) or any ' +
       'personal data — public web content in service of a search task only.',
@@ -384,8 +422,9 @@ server.registerTool(
       'top pages. Slower than plain search (~1-3 s per page). Result pages that are PDF ' +
       'documents are detected as such: their first pages are captured as images ' +
       '(pdfPages, default 2) and the full file is downloaded, and the paths are ' +
-      'reported instead of text. If the profile is signed in with a Google account, the ' +
-      'session is scoped to ' +
+      'reported instead of text. Result pages that are image/media files are detected ' +
+      'as such too: the file is downloaded and the path reported instead of text. ' +
+      'If the profile is signed in with a Google account, the session is scoped to ' +
       'this plugin\'s web search only — never use it for other Google services or personal ' +
       'data.',
     inputSchema: {
