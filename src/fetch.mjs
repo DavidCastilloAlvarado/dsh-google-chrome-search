@@ -106,12 +106,17 @@ function isPdfUrl(u) {
   }
 }
 
-/** A safe file name for a downloaded PDF, derived from the URL. */
+/**
+ * A safe file name for a downloaded PDF. Prefixed with the current
+ * epoch-millis timestamp (same convention as the screenshot / PDF page files)
+ * so generic basenames (two different hosts both serving `sample.pdf`) stay
+ * distinguishable and chronologically sortable across repeated downloads.
+ */
 function pdfFileName(u, fallback) {
   try {
     const raw = decodeURIComponent(new URL(u).pathname).split('/').filter(Boolean).pop() || ''
-    const name = (raw || 'document').replace(/[^\w.-]+/g, '-').slice(0, 120)
-    return /\.pdf$/i.test(name) ? name : `${name}.pdf`
+    const stem = raw.replace(/[^\w.-]+/g, '-').replace(/\.pdf$/i, '').slice(0, 120)
+    return `${Date.now()}-${stem || 'document'}.pdf`
   } catch {
     return fallback
   }
@@ -209,16 +214,28 @@ function isImageUrl(u) {
   }
 }
 
-/** A safe file name for a downloaded media file, derived from the URL. */
+/**
+ * A safe file name for a downloaded media file. Prefixed with the current
+ * epoch-millis timestamp (same convention as the screenshot / PDF page files)
+ * so generic basenames (gitbook serves everything as `image.png`) stay
+ * distinguishable and chronologically sortable across repeated downloads.
+ *
+ * Extension precedence: a real extension on the URL basename wins over the
+ * content-type — some hosts (gitbook included) declare `image/webp` while
+ * actually serving PNG bytes, so the URL's `.png` must be trusted first.
+ */
 function mediaFileName(u, ext) {
+  let base = ''
   try {
-    const raw = decodeURIComponent(new URL(u).pathname).split('/').filter(Boolean).pop() || ''
-    const name = (raw || `media-${Date.now()}`).replace(/[^\w.-]+/g, '-').slice(0, 120)
-    if (/\.\w{2,5}$/.test(name)) return name
-    return ext ? `${name}.${ext}` : `${name}-${Date.now()}`
+    base = decodeURIComponent(new URL(u).pathname).split('/').filter(Boolean).pop() || ''
   } catch {
-    return `media-${Date.now()}${ext ? `.${ext}` : ''}`
+    /* unparseable URL — timestamp only */
   }
+  const stem = base.replace(/[^\w.-]+/g, '-').replace(/\.\w{2,5}$/, '').slice(0, 120)
+  const e = /\.(png|jpe?g|jfif|gif|webp|avif|bmp|svg|ico|tiff?)$/i.test(base)
+    ? path.extname(base)
+    : ext ? `.${ext}` : ''
+  return `${Date.now()}${stem ? `-${stem}` : ''}${e}`
 }
 
 /**
